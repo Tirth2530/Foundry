@@ -34,6 +34,25 @@ ADMINS = {a.strip() for a in (config.env("FOUNDRY_ADMINS", "") or "").split(",")
 LEARN_PER_DAY = int(config.env("FOUNDRY_LEARN_PER_DAY", "3"))
 
 
+MENTION = re.compile(r"^\s*(@[\w\-]+\s*)+|@agent1[0-9a-z]{20,}\s*", re.I)
+BUILD_WORDS = re.compile(r"\b(build|create|make|generate|develop|write|implement|set up|i need|i want)\b|"
+                         r"\bagents?\s+(that|which|to|for)\b|\b(two|three|multi)[- ]agents?\b", re.I)
+FIND_WORDS = re.compile(r"^\s*(find|search|look for|is there|does an? agent)\b", re.I)
+
+
+def clean(text: str) -> str:
+    """Strip @mentions ASI:One may include, plus surrounding quotes/whitespace."""
+    return MENTION.sub(" ", text or "").strip().strip('"').strip()
+
+
+def is_build_request(text: str) -> bool:
+    return len(text) >= 15 and bool(BUILD_WORDS.search(text))
+
+
+def is_find(text: str) -> bool:
+    return bool(FIND_WORDS.search(text)) and len(text) > 12
+
+
 def _now():
     return datetime.now(timezone.utc)
 
@@ -75,7 +94,9 @@ class Foreman:
                 return  # idempotent on ASI:One retries
             self.seen.add(str(msg.msg_id))
             text = " ".join(c.text for c in msg.content if isinstance(c, TextContent)).strip()
+            text = clean(text)
             started = any(isinstance(c, StartSessionContent) for c in msg.content)
+            ctx.logger.info(f"chat from {sender[:14]}...: {text[:240]!r}")
             try:
                 await self.route(ctx, sender, text, started)
             except Exception as e:  # noqa: BLE001 - never leave the user without a reply
@@ -178,11 +199,13 @@ class Foreman:
         }
         if action in handlers:
             return await handlers[action]()
-        if action == "find":
+        if action == "find" or (action is None and is_find(text)):
+            if action is None:
+                jid = text
             return await self.quote(ctx, sender, jid or text, None, intro=(
                 "Searching Agentverse and my verified catalog. I'll re-test the best matches live, because a "
                 "listing or a README isn't proof."))
-        if len(text) < 25:
+        if not is_build_request(text):
             return await self.welcome(ctx, sender)
         return await self.quote(ctx, sender, text, None)
 
