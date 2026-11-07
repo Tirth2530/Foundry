@@ -153,7 +153,28 @@ def judge(cases: list[dict], raw: dict) -> list[dict]:
             continue
         rec = (raw_cases[i] if i < len(raw_cases) else None) or {"turns": [{"error": "case not executed"}]}
         results.append(dsl.evaluate_case(case, rec))
+    _explain_silence(results, raw)
     return results
+
+
+def _explain_silence(results: list[dict], raw: dict) -> None:
+    """A missing reply is almost always a crashed handler. The receive tap saw the exception: put it in the
+    failure detail so the Builder repairs the real bug (and the Miner learns the real root cause) instead of
+    guessing from 'NO_REPLY'."""
+    errs = []
+    for r in raw.get("received_log") or []:
+        if r.get("ok") is False and r.get("error"):
+            e = f"{r.get('to')} handler raised {r['error']}"
+            if e not in errs:
+                errs.append(e)
+    if not errs:
+        return
+    hint = " | the agent's message handler CRASHED: " + " ; ".join(errs[:3])[:600]
+    for res in results:
+        for t in res.get("turns", []):
+            for c in t.get("checks", []):
+                if not c.get("ok") and c.get("code") == dsl.NO_REPLY and "CRASHED" not in (c.get("detail") or ""):
+                    c["detail"] = (c.get("detail") or "") + hint
 
 
 def _interesting(err: str, limit: int = 2500) -> str:

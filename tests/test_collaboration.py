@@ -313,3 +313,14 @@ def test_taps_record_each_message_once_under_real_uagents_layering():
             sys.modules["uagents.context"] = old
         else:
             sys.modules.pop("uagents.context", None)
+
+
+def test_no_reply_failures_carry_the_handler_crash_to_the_builder():
+    from foundry.harness import run as harness
+    cases = [{"name": "c", "turns": [{"send": "new", "checks": [{"type": "text_contains", "value": "2"}]}]}]
+    raw = {"entry": "game", "load_errors": {}, "cases": [{"turns": [{"replies": [], "acked": True}]}],
+           "received_log": [{"to": "game", "from": "client", "ok": False,
+                             "error": "ValidationError: metadata -> card_payload str type expected"}]}
+    res = harness.judge(cases, raw)
+    detail = " ".join(c["detail"] for t in res[0]["turns"] for c in t["checks"] if not c["ok"])
+    assert "CRASHED" in detail and "card_payload str type expected" in detail

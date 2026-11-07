@@ -200,6 +200,11 @@ def job_failures(job_id: str) -> list[dict]:
     out = []
     for vf in sorted((config.RUNS / job_id / "attempts").glob("*/verify.json")):
         data = json.loads(vf.read_text())
+        try:  # attempts saved before crash details existed: recover them from the recorded receive log
+            from .harness.run import _explain_silence
+            _explain_silence(data.get("results", []), data.get("raw") or {})
+        except Exception:  # noqa: BLE001
+            pass
         for f in failures(data.get("results", [])):
             out.append({**f, "attempt": vf.parent.name})
         for name, tb in ((data.get("raw") or {}).get("load_errors") or {}).items():
