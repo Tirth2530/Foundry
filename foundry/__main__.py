@@ -12,6 +12,7 @@
   history                    every patch FOUNDRY proposed, and what the gate decided
   rollback vNNNN             point CURRENT back to an earlier skill version
   claim job_xxxxxx           deploy a verified build into YOUR Agentverse account (CLAIM_AGENTVERSE_API_KEY)
+  recheck job_xxxxxx         re-test whether a deployed agent is in the Agentverse search index
   report                     write evidence/report.md (numbers for the pitch)
   lint                       validate benchmark specs and the ledger hash chain
   search "<what you need>"   RAW Agentverse search only: is the search API returning real agents? (no LLM)
@@ -46,14 +47,20 @@ def cmd_doctor(_):
             ok = False
             print(f"[!!] {p} ({c['model']}): {e}")
     if config.AGENTVERSE_API_KEY:
-        import requests
-        r = requests.get(f"{config.AGENTVERSE_URL}/v1/hosting/agents",
-                         headers={"Authorization": f"Bearer {config.AGENTVERSE_API_KEY}"}, timeout=20)
-        print(f"[{'ok' if r.status_code < 300 else '!!'}] Agentverse API key (HTTP {r.status_code})")
+        from . import agentverse
+        pr = agentverse.Client().probe_api()  # SAME version resolution as deployment (AGENTVERSE_HOSTING_API)
+        ok &= pr["ok"]
+        print(f"[{'ok' if pr['ok'] else '!!'}] Agentverse hosting API {pr['api']} (tried: {'; '.join(pr['tried'])})")
     else:
         print("[--] AGENTVERSE_API_KEY not set (needed for gate1/publish)")
     from .agents import payments
     print(f"[{'ok' if payments.enabled() else '--'}] Stripe test payments {'enabled' if payments.enabled() else 'off (demo mode)'}")
+    from .harness import run as harness
+    try:
+        print(f"[ok] sandbox mode: {harness.sandbox_mode()}")
+    except harness.SandboxNotConfigured as e:
+        ok = False
+        print(f"[!!] sandbox: {e}")
     sys.exit(0 if ok else 1)
 
 
@@ -90,8 +97,8 @@ def cmd_selftest(_):
     m = harness.run(multi, "coordinator", [{"name": "m", "turns": [{"send": "hello agents", "checks": [
         {"type": "text_contains", "value": "UPPER: HELLO AGENTS"}]}]}])
     tfail = topology.check_spec({"agents": ["upper", "coordinator"], "must_receive": ["upper"]}, m["raw"],
-                                ["upper", "coordinator"])
-    multi_ok = m["results"][0]["passed"] and m["raw"].get("traffic_tap") and not tfail
+                                ["upper", "coordinator"], "coordinator", m["results"])
+    multi_ok = m["results"][0]["passed"] and m["raw"].get("traffic_tap") and m["raw"].get("receive_tap") and not tfail
     print(f"  reply ok: {m['results'][0]['passed']}; traffic observed: {m['raw'].get('traffic')}; "
           f"tap installed: {m['raw'].get('traffic_tap')}")
     print(f"  sandbox mode: {m.get('sandbox')}")
@@ -104,6 +111,7 @@ def cmd_selftest(_):
     print(f"\nGATE 2: {'PASS' if passed else 'FAIL'} (evidence/gate2_selftest.json)")
     if not passed and g["stderr_tail"]:
         print("runner stderr:\n" + g["stderr_tail"])
+    sys.exit(0 if passed else 1)
 
 
 def cmd_build(a):
@@ -134,7 +142,7 @@ def cmd_serve(a):
         agent.run()
         return
     from .agents import network
-    roles = network.build_roles()
+    roles = network.build_roles(agent.address)  # role agents accept tasks from the Foreman only
     network.install(agent, roles)
     fm.Foreman(agent)
     print(f"FOUNDRY agent network: Foreman {agent.address} + {len(roles)} role agents")
@@ -247,6 +255,13 @@ def cmd_scout(a):
     print(f"\nDECISION: {'REUSE ' + res['candidate']['address'] if res['found'] else 'BUILD NEW (nothing passed live)'}")
 
 
+def cmd_recheck(a):
+    from .roles import publisher
+    out = publisher.recheck(a.job, wait_s=a.wait)
+    print(json.dumps({k: out.get(k) for k in ("publication_status", "entry", "checks", "discovery")}, indent=1))
+    sys.exit(0 if out["publication_status"] == "DISCOVERABLE" else 1)
+
+
 def cmd_report(_):
     from . import report
     print(report.write())
@@ -294,6 +309,9 @@ def main():
     r.add_argument("version")
     c = sub.add_parser("claim")
     c.add_argument("job")
+    rc = sub.add_parser("recheck")
+    rc.add_argument("job")
+    rc.add_argument("--wait", type=float, default=0, help="keep polling the search index for N seconds")
     sub.add_parser("report")
     sub.add_parser("lint")
     se = sub.add_parser("search")
@@ -303,7 +321,7 @@ def main():
     a = ap.parse_args()
     {"doctor": cmd_doctor, "gate1": cmd_gate1, "selftest": cmd_selftest, "build": cmd_build, "serve": cmd_serve,
      "evolve": cmd_evolve, "eval-final": cmd_eval_final, "history": cmd_history, "rollback": cmd_rollback,
-     "claim": cmd_claim, "learn": cmd_learn, "sandbox-build": cmd_sandbox_build, "report": cmd_report, "lint": cmd_lint, "search": cmd_search,
+     "claim": cmd_claim, "learn": cmd_learn, "sandbox-build": cmd_sandbox_build, "report": cmd_report, "recheck": cmd_recheck, "lint": cmd_lint, "search": cmd_search,
      "scout": cmd_scout}[a.cmd](a)
 
 

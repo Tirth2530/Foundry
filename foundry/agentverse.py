@@ -205,7 +205,8 @@ class Client:
         return False
 
     def teardown(self, addrs) -> dict:
-        """Stop and delete; report what was CONFIRMED, never assume."""
+        """Stop, delete, then CONFIRM the agent is gone (a GET must answer 404). Report what was observed;
+        never assume a cleanup worked because the delete call returned."""
         report = {}
         for a in addrs:
             res = {}
@@ -215,8 +216,54 @@ class Client:
                     res[op] = "ok"
                 except AgentverseError as e:
                     res[op] = f"failed: {str(e)[:120]}"
+            res["absent"] = confirm_absent(self, a)
             report[a] = res
         return report
+
+    def probe_api(self) -> dict:
+        """Resolve the hosting API version exactly as deployment does (same AGENTVERSE_HOSTING_API rule),
+        with a read-only list call. Used by `doctor`, so doctor and deploy can never disagree."""
+        tried = []
+        order = ["v1", "v2"] if self.api == "auto" else [self.api]
+        for v in order:
+            path = "/v1/hosting/agents" if v == "v1" else "/v2/hosting"
+            try:
+                self._req("GET", path, retries=0)
+                if self.api == "auto":
+                    self.api = v
+                return {"ok": True, "api": v, "tried": tried + [path]}
+            except AgentverseError as e:
+                tried.append(f"{path} -> {str(e)[:120]}")
+                if getattr(e, "status", None) not in self.GONE:
+                    return {"ok": False, "api": v, "tried": tried, "status": getattr(e, "status", None)}
+        return {"ok": False, "api": None, "tried": tried}
+
+    def discoverable(self, address: str, queries: list[str], *, wait_s: float = 0, every_s: float = 20) -> dict:
+        """Is `address` returned by the Agentverse marketplace search (the index ASI:One discovers from)?
+        Polls until found or wait_s elapses: new agents take time to be indexed, so a miss is reported as
+        PENDING, never as success. Being reachable at a known address is NOT discoverability."""
+        t0 = time.time()
+        attempts = []
+        while True:
+            for q in queries:
+                for semantic in (False, True):
+                    try:
+                        hits = self.search_agents(q, limit=30, semantic=semantic, retries=1)
+                    except AgentverseError as e:
+                        attempts.append({"q": q[:80], "semantic": semantic, "error": str(e)[:160]})
+                        continue
+                    found = any(h.get("address") == address for h in hits)
+                    attempts.append({"q": q[:80], "semantic": semantic, "hits": len(hits), "found": found})
+                    if found:
+                        return {"status": "PASS", "found_by": q[:80], "semantic": semantic,
+                                "after_s": round(time.time() - t0, 1), "attempts": attempts[-12:]}
+            if time.time() - t0 + every_s > wait_s:
+                errors_only = attempts and all("error" in a for a in attempts)
+                return {"status": "UNVERIFIED" if errors_only else "PENDING", "after_s": round(time.time() - t0, 1),
+                        "attempts": attempts[-12:],
+                        "note": "search API failed" if errors_only else
+                        "not in the search index yet (indexing can lag); re-check with `foundry recheck <job>`"}
+            time.sleep(every_s)
 
     def search_agents(self, text: str, *, limit: int = 15, semantic: bool = True, retries: int = 2) -> list[dict]:
         """Agentverse marketplace search (POST /v1/search/agents). Retries transient failures;
@@ -308,6 +355,20 @@ def _indexed_values(logs: str, marker: str):
 
 def _indexed(logs: str, marker: str) -> set:
     return {i for i, _ in _indexed_values(logs, marker)}
+
+
+def confirm_absent(client, address: str) -> bool | None:
+    """True only when the platform answers 404 for the address after deletion; None if it can't be checked."""
+    getter = getattr(client, "get", None)
+    if getter is None:
+        return None
+    try:
+        getter(address)
+    except AgentverseError as e:
+        return True if getattr(e, "status", None) in (404, 410) else None
+    except Exception:  # noqa: BLE001
+        return None
+    return False
 
 
 def has_chat_protocol(hit: dict) -> bool:

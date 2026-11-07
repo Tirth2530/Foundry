@@ -91,7 +91,7 @@ def main():
         if target:
             report = c.teardown([target])
             relay_clean = ev["steps"][-1].get("relay_cleanup") if ev["steps"] else None
-            confirmed = all(v == "ok" for v in report[target].values())
+            confirmed = report[target].get("delete") == "ok" and report[target].get("absent") is True
             ev["cleanup_confirmed"] = confirmed
             step("cleanup", target=report[target], relay=relay_clean, confirmed=confirmed)
     ev["finished"] = datetime.now(timezone.utc).isoformat()
@@ -99,6 +99,8 @@ def main():
     out = ROOT / "evidence" / "gate1.json"
     out.write_text(json.dumps(ev, indent=2))
     print(f"\nGATE 1: {ev['result']}\nEvidence: {out}")
+    if ev["result"] != "PASS" or not ev.get("cleanup_confirmed", True):
+        sys.exit(1)  # a failed gate (or an unconfirmed cleanup) must fail the shell / CI step
 
 
 if __name__ == "__main__":

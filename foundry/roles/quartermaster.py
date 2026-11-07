@@ -33,10 +33,22 @@ def quote(request: str, skills) -> dict:
     return {"estimate_usd": round(est, 4), "p90_usd": round(p90, 4), "cap_usd": cap, "price_usd": round(price, 2),
             "hosting": "Agentverse hosted (not metered)", "test_compute": "local sandbox (not metered)",
             "metered": "model tokens only",
+            "on_exhaustion": "the next model call is refused before it is sent; the build stops as budget_exceeded "
+                             "and is never published",
+            "per_call_runtime_usd": 0.0,
+            "per_call_note": "generated agents make no model calls unless the request asks for one; hosting cost is "
+                             "set by Agentverse",
+            "reuse_usd": 0.0,
             "basis": basis, "skills_version": skills.version}
 
 
-def reconcile(q: dict, actual_usd: float) -> dict:
+def reconcile(q: dict, actual_usd: float, cost: dict | None = None) -> dict:
+    """Actual vs quoted. The three cost kinds stay separate: `estimated` (pre-call reservations), `calculated`
+    (tokens x configured price) and `provider_reported` (only when the provider returns a cost)."""
+    cost = cost or {}
     return {"quoted_usd": q["estimate_usd"], "actual_usd": round(actual_usd, 4), "cap_usd": q["cap_usd"],
             "within_cap": actual_usd <= q["cap_usd"],
-            "delta_pct": round(100 * (actual_usd - q["estimate_usd"]) / q["estimate_usd"], 1) if q["estimate_usd"] else None}
+            "delta_pct": round(100 * (actual_usd - q["estimate_usd"]) / q["estimate_usd"], 1) if q["estimate_usd"] else None,
+            "estimated_usd": cost.get("estimated_usd"), "calculated_usd": cost.get("calculated_usd"),
+            "provider_reported_usd": cost.get("provider_reported_usd"),
+            "not_metered": "Agentverse hosting and local sandbox compute"}

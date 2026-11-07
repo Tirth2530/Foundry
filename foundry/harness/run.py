@@ -62,15 +62,28 @@ RUNNER = Path(__file__).resolve().parent / "runner.py"
 IMAGE = config.env("FOUNDRY_SANDBOX_IMAGE", "foundry-sandbox:1")
 
 
+class SandboxNotConfigured(RuntimeError):
+    pass
+
+
 def sandbox_mode() -> str:
-    want = config.env("FOUNDRY_SANDBOX", "auto")
+    """Untrusted generated code never runs under an IMPLICIT isolation choice. FOUNDRY_SANDBOX must say which:
+      docker   the hardened container (required for sealed promotion/final sets; see judge.require_docker)
+      process  weaker: an isolated child process with no credentials, for local development only
+    There is no silent fallback from docker to process."""
+    want = config.env("FOUNDRY_SANDBOX")
+    if want not in ("docker", "process"):
+        raise SandboxNotConfigured(
+            f"FOUNDRY_SANDBOX is {want!r}: set it explicitly to 'docker' (run `python -m foundry sandbox-build` "
+            "first) or 'process' (weaker, development only) before executing generated code")
     if want == "process":
         return "process"
     has_image = shutil.which("docker") and subprocess.run(
         ["docker", "image", "inspect", IMAGE], capture_output=True).returncode == 0
-    if want == "docker" and not has_image:
-        raise RuntimeError(f"FOUNDRY_SANDBOX=docker but image {IMAGE} is missing: run `python -m foundry sandbox-build`")
-    return "docker" if has_image else "process"
+    if not has_image:
+        raise SandboxNotConfigured(f"FOUNDRY_SANDBOX=docker but image {IMAGE} is missing: run "
+                                   "`python -m foundry sandbox-build`")
+    return "docker"
 
 
 def _command(mode: str, job_path: str, work: str, hard: float) -> list[str]:

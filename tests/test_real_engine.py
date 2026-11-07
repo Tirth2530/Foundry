@@ -15,6 +15,7 @@ from foundry.dsl import failures  # noqa: E402
 from foundry.harness import run as harness  # noqa: E402
 
 REF = config.ROOT / "tools" / "reference"
+os.environ.setdefault("FOUNDRY_SANDBOX", "process")  # explicit choice; set FOUNDRY_SANDBOX=docker to test Docker
 
 
 def test_runner_passes_correct_agent_and_catches_defective_one():
@@ -66,9 +67,11 @@ def test_real_multi_agent_traffic_is_observed():
     assert out["results"][0]["passed"], (out["results"], out["stderr_tail"])
     raw = out["raw"]
     assert raw.get("traffic_tap") is True, "traffic tap not installed on this uagents version"
-    assert topology.check_spec({"agents": ["upper", "coordinator"], "must_receive": ["upper"]},
-                               raw, ["upper", "coordinator"]) == []
+    assert raw.get("receive_tap") is True, "receive tap not installed on this uagents version"
+    req = {"agents": ["upper", "coordinator"], "must_receive": ["upper"]}
+    assert topology.check_spec(req, raw, ["upper", "coordinator"], "coordinator", out["results"]) == []
+    hand_off = [r for r in raw["received_log"] if r["from"] == "coordinator" and r["to"] == "upper"]
+    assert hand_off and hand_off[0]["ok"] and hand_off[0]["corr"]
     # the same outputs from ONE agent must FAIL the collaboration check
-    assert topology.check_spec({"agents": ["upper", "coordinator"], "must_receive": ["upper"]},
-                               {"traffic_tap": True, "traffic": [{"from": "client", "to": "coordinator"}]},
-                               ["upper", "coordinator"])
+    only_client = {**raw, "received_log": [r for r in raw["received_log"] if r["from"] == "client"]}
+    assert topology.check_spec(req, only_client, ["upper", "coordinator"], "coordinator", out["results"])

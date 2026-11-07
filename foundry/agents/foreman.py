@@ -56,6 +56,7 @@ class Foreman:
         self.loop = None
         self.ctx = None
         self.evolving = threading.Lock()
+        self.cancels: dict = {}  # job_id -> threading.Event checked before every paid stage / model call
         self._load_jobs()
 
         chat_proto = Protocol(spec=chat_protocol_spec)
@@ -93,8 +94,8 @@ class Foreman:
 
         @pay_proto.on_message(RejectPayment)
         async def _on_reject(ctx: Context, sender: str, msg: RejectPayment):
-            for j in self.jobs.values():
-                if j.get("sender") == sender and j["status"] == "awaiting_payment":
+            for j in self.jobs.values():  # only the rejecting user's own unpaid jobs
+                if j.get("sender") == sender and j["status"] == "awaiting_payment" and not j.get("paid"):
                     self._update(j, status="cancelled")
             await ctx.send(sender, chat("Payment declined, so nothing will be built. Send a new request any time."))
 
@@ -143,7 +144,8 @@ class Foreman:
             req = str(sel.get("request", "")).strip()
             budget = sel.get("budget")
             return await self.quote(ctx, sender, req, budget)
-        job_actions = ("approve_quote", "reject_quote", "publish", "evidence", "reuse", "build_new", "learn")
+        job_actions = ("approve_quote", "reject_quote", "publish", "evidence", "reuse", "build_new", "learn",
+                       "recheck", "cancel", "passport", "permissions")
         if action in job_actions and jid not in self.jobs:
             return await ctx.send(sender, chat(f"I couldn't find job {jid}. Say 'status' to see your jobs."))
         # AUTHORIZATION: a job can only be approved, paid, published, inspected or learned from by the
@@ -166,7 +168,9 @@ class Foreman:
             "reuse": lambda: self.reuse(ctx, sender, self.jobs[jid], (sel or {}).get("pick")),
             "build_new": lambda: self.build_new(ctx, sender, self.jobs[jid]),
             "reject_quote": lambda: self.reject(ctx, sender, self.jobs[jid]),
+            "cancel": lambda: self.cancel(ctx, sender, self.jobs[jid]),
             "publish": lambda: self.publish(ctx, sender, self.jobs[jid]),
+            "recheck": lambda: self.recheck(ctx, sender, self.jobs[jid]),
             "evidence": lambda: self.evidence(ctx, sender, self.jobs[jid]),
             "learn": lambda: self.learn(ctx, sender, self.jobs[jid]),
             "scoreboard": lambda: self.scoreboard(ctx, sender),
@@ -191,12 +195,16 @@ class Foreman:
         m = JOB_RE.search(low)
         jid = m.group(0) if m else None
         if jid:
-            if any(w in low for w in ("reject", "cancel", "decline")):
+            if "cancel" in low or "stop" in low:
+                return "cancel", jid
+            if any(w in low for w in ("reject", "decline")):
                 return "reject_quote", jid
             if "use this agent" in low or "reuse" in low or "use existing" in low:
                 return "reuse", jid
             if "build a new" in low or "build new" in low:
                 return "build_new", jid
+            if "recheck" in low or "re-check" in low:
+                return "recheck", jid
             if "publish" in low or "deploy" in low:
                 return "publish", jid
             if "learn" in low or "teach" in low:
@@ -413,18 +421,39 @@ class Foreman:
         job = next((j for j in self.jobs.values() if j.get("checkout_id") == tx), None)
         if not job:
             return await ctx.send(sender, RejectPayment(reason="unknown checkout session"))
-        if tx in self.paid_tx:
-            return await ctx.send(sender, CompletePayment(transaction_id=tx))  # idempotent
+        if job.get("sender") != sender:  # only the job's owner can commit its payment
+            ledger.append("auth_denied", action="commit_payment", job_id=job["job_id"], sender=sender)
+            return await ctx.send(sender, RejectPayment(reason="this checkout belongs to another user"))
+        if tx in self.paid_tx or job.get("paid_tx") == tx:
+            # idempotent across retries AND restarts: never a second build, never a second completion record
+            return await ctx.send(sender, CompletePayment(transaction_id=tx))
+        if job["status"] != "awaiting_payment":
+            return await ctx.send(sender, RejectPayment(reason=f"job is {job['status']}, not awaiting payment"))
         ok, why = await asyncio.to_thread(payments.verify, tx, job["job_id"], job["expected_cents"])
         if not ok:
+            ledger.append("payment_verification_failed", job_id=job["job_id"], tx=tx, reason=why)
             return await ctx.send(sender, RejectPayment(reason=why))
         self.paid_tx.add(tx)
-        ledger.append("payment_completed", job_id=job["job_id"], tx=tx)
+        self._update(job, paid=True, paid_tx=tx)  # persisted BEFORE anything else happens
+        ledger.append("payment_completed", job_id=job["job_id"], tx=tx, verified_with="stripe")
         await ctx.send(sender, CompletePayment(transaction_id=tx))
-        self._update(job, status="quoted", paid=True)
+        self._update(job, status="quoted")
         await self.start_build(ctx, sender, job)
 
+    async def cancel(self, ctx, sender, job):
+        st = job["status"]
+        if st in ("building",):
+            self.cancels.setdefault(job["job_id"], threading.Event()).set()
+            self._update(job, status="cancelling", cancel_requested=time.time())
+            ledger.append("cancel_requested", job_id=job["job_id"], by=sender)
+            return await ctx.send(sender, chat(f"Cancelling {job['job_id']}: no further model call will be made. "
+                                               "I'll confirm when the running stage has stopped."))
+        if st in ("quoted", "awaiting_payment", "reuse_offer", "scouted"):
+            return await self.reject(ctx, sender, job)
+        await ctx.send(sender, chat(f"{job['job_id']} is {st}; there is nothing running to cancel."))
+
     async def start_build(self, ctx, sender, job):
+        self.cancels[job["job_id"]] = threading.Event()
         self._update(job, status="building", started=time.time())
         await ctx.send(sender, chat(f"Approved. Building {job['job_id']} now. I'll post progress here."))
         threading.Thread(target=self._build_worker, args=(job,), daemon=True).start()
@@ -446,11 +475,14 @@ class Foreman:
                                         f"repairing it. First failure: {info['why'][:220]}"))
         try:
             res = pipeline.build(job["request"], sk.load(job.get("skills_version")),
-                                 budget_usd=job["quote"]["cap_usd"], job_id=jid, progress=progress)
+                                 budget_usd=job["quote"]["cap_usd"], job_id=jid, progress=progress,
+                                 cancel=self.cancels.get(jid))
         except Exception as e:  # noqa: BLE001
             self._update(job, status="error", error=str(e))
             return self.later(sender, chat(f"{jid} hit an unrecoverable error: {e}. Evidence is in runs/{jid}/."))
-        recon = quartermaster.reconcile(job["quote"], res["cost"]["total_usd"])
+        recon = quartermaster.reconcile(job["quote"], res["cost"]["total_usd"], res["cost"])
+        if res["status"] == "cancelled":
+            ledger.append("cancel_completed", job_id=jid, spent_usd=res["cost"]["total_usd"])
         self._update(job, status=res["status"], verify=res.get("verify"), reconcile=recon,
                      agents=(res.get("artifact") or {}).get("agents"), error=res.get("error"))
         self.later(sender, self.result_message(job, res, recon))
@@ -512,8 +544,10 @@ class Foreman:
             return await ctx.send(sender, chat(f"{job['job_id']} is {job['status']}. I only publish verified builds."))
         if not config.AGENTVERSE_API_KEY:
             return await ctx.send(sender, chat("Publishing needs AGENTVERSE_API_KEY on the FOUNDRY server."))
-        if job.get("published"):
-            return await ctx.send(sender, chat(f"Already live: {job['published']['entry']}"))
+        if (job.get("published") or {}).get("released"):
+            return await ctx.send(sender, chat(f"Already deployed: {job['published']['entry']} "
+                                               f"({job['published'].get('publication_status')}). Say "
+                                               f"'recheck {job['job_id']}' to re-test discoverability."))
         self._update(job, status="publishing")
         await ctx.send(sender, chat("Publishing to Agentverse, then calling the live agent as an independent "
                                     "third party to confirm it behaves the same in production."))
@@ -540,19 +574,43 @@ class Foreman:
                 f"({bad.get('code', '')}: {str(bad.get('detail', ''))[:160]}). I tore down the deployment ({clean}), "
                 "so nothing unverified is live. The sandbox-verified build is unchanged, so you can retry publishing."))
         self._update(job, status="verified", published=out)
+        self.later(sender, self.publish_message(job, out))
+
+    @staticmethod
+    def publish_message(job, out) -> ChatMessage:
+        live, checks = out["live_invocation"], out.get("checks", {})
         live_txt = ("skipped" if live.get("skipped") else
                     f"{'PASS' if live.get('passed') else 'FAIL'} in {live.get('latency_s', '?')}s · "
                     f"reply: {(live.get('texts') or ['(none)'])[0][:120]}")
-        md = cards.detail(f"Live on Agentverse · {job['job_id']}", [
+        status = out.get("publication_status")
+        disc = out.get("discovery") or {}
+        md = cards.detail(f"{'Published' if status == 'DISCOVERABLE' else 'Deployed, not yet discoverable'} · "
+                          f"{job['job_id']}", [
+            ("Publication status", status),
+            ("Checks", " · ".join(f"{k}: {v}" for k, v in checks.items())),
             ("Entry agent", out["entry"]),
             ("Profile", out["profile_url"]),
             ("Independent live call", live_txt),
+            ("Agentverse search", f"{disc.get('status')} after {disc.get('after_s')}s"
+                                  + (f" (found by {disc.get('found_by')!r})" if disc.get("found_by") else
+                                     " · indexing can lag; tap Re-check discoverability")),
             ("Agents deployed", str(len(out["agents"]))),
-            ("Use it", "Open the profile or @mention the agent in ASI:One"),
-            ("Claim it", f"Run `python -m foundry claim {job['job_id']}` with your own Agentverse key to deploy this "
-                         "exact verified build into your account"),
-        ], [("Show evidence", {"action": "evidence", "job_id": job["job_id"]}, False)])
-        self.later(sender, chat(f"{job['job_id']} is live. Address: {out['entry']}", md))
+            ("Ownership", out.get("ownership", "FOUNDRY's Agentverse account")),
+            ("Claim it", f"`python -m foundry claim {job['job_id']}` with your own Agentverse key deploys this exact "
+                         "verified build into your account (FOUNDRY's copy is not transferred)"),
+        ], [("Re-check discoverability", {"action": "recheck", "job_id": job["job_id"]}, status != "DISCOVERABLE"),
+            ("Show evidence", {"action": "evidence", "job_id": job["job_id"]}, False)])
+        text = (f"{job['job_id']} is published and discoverable. Address: {out['entry']}" if status == "DISCOVERABLE"
+                else f"{job['job_id']} is deployed and answered correctly at {out['entry']}, but Agentverse search does "
+                     "not return it yet, so I am NOT calling it published. I'll re-check when you ask.")
+        return chat(text, md)
+
+    async def recheck(self, ctx, sender, job):
+        if not (job.get("published") or {}).get("released"):
+            return await ctx.send(sender, chat(f"{job['job_id']} has no live deployment to re-check."))
+        out = await asyncio.to_thread(publisher.recheck, job["job_id"])
+        self._update(job, published=out)
+        await ctx.send(sender, self.publish_message(job, out))
 
     async def status(self, ctx, sender):
         mine = sorted((j for j in self.jobs.values() if j.get("sender") == sender), key=lambda j: -j["created"])[:8]

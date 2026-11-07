@@ -59,6 +59,7 @@ def harness_failures(results):
 TRANSPORT = None
 
 LLM_ROLES = {"scout", "architect", "examiner", "adversary", "builder"}
+COLLAB_OK = {topo.PASS, topo.NOT_TESTED}  # NOT TESTED only ever means "single agent, nothing required"
 
 
 def rpc(role: str, op: str, fn, *, skills=None, meter=None, events=None, **kw):
@@ -69,9 +70,22 @@ def rpc(role: str, op: str, fn, *, skills=None, meter=None, events=None, **kw):
     payload = {"op": op, "kwargs": kw}
     if skills is not None:
         payload.update(skills_path=str(skills.path), skills_version=skills.version)
-    if meter is not None and meter.cap_usd is not None:
-        payload["cap_remaining"] = max(0.0, meter.cap_usd - meter.total_usd)
-    res = TRANSPORT(role, payload)
+    grant = None
+    if meter is not None and role in LLM_ROLES | {"miner"}:
+        # The role agent spends on our behalf: reserve its whole allowance in OUR budget chain first, so
+        # concurrent jobs/role calls can never jointly overspend; the unused part is released afterwards.
+        meter.raise_if_cancelled()
+        room = meter.headroom()
+        if room is not None and room <= 0:
+            raise llm.BudgetExceeded(f"no budget left for {role}.{op}")
+        if room is not None:
+            grant = meter.reserve(room)
+            payload["cap_remaining"] = room
+    try:
+        res = TRANSPORT(role, payload)
+    finally:
+        if grant is not None:
+            meter.settle(grant, None)
     for c in res.get("calls", []):
         if meter is not None:
             meter.add(c)
@@ -87,12 +101,18 @@ def rpc(role: str, op: str, fn, *, skills=None, meter=None, events=None, **kw):
 
 def build(request: str, skills, *, budget_usd: float | None = None, job_id: str | None = None,
           hidden_tests: list | None = None, spec_id: str | None = None, progress=None,
-          out_dir: Path | None = None, topology: dict | None = None) -> dict:
+          out_dir: Path | None = None, topology: dict | None = None, parent_meter=None, cancel=None) -> dict:
+    """parent_meter: an enclosing budget (evolution run, comparison arm); cancel: threading.Event that stops
+    every later paid stage (checked before each stage and before each model call)."""
     job_id = job_id or new_job_id()
     jd = out_dir or (config.RUNS / job_id)
-    meter = llm.CostMeter(cap_usd=budget_usd)
+    meter = llm.new_meter(budget_usd, parent=parent_meter, name=f"build {job_id}", job_id=job_id, cancel_event=cancel)
     events: list = []
-    say = progress or (lambda stage, info=None: None)
+    _say = progress or (lambda stage, info=None: None)
+
+    def say(stage, info=None):
+        meter.raise_if_cancelled()  # cancellation checkpoint between stages
+        _say(stage, info)
     t0 = time.time()
     result = {"job_id": job_id, "spec_id": spec_id, "skills_version": skills.version, "request": request,
               "status": "running", "attempts": [], "events": events}
@@ -118,6 +138,7 @@ def build(request: str, skills, *, budget_usd: float | None = None, job_id: str 
                       "independent": exam.get("independent"), "adversarial": len(adv)})
         art = rpc("builder", "build", builder.build, skills=skills, meter=meter, events=events, request=request, plan=plan)
         budget = int(skills.config.get("repair_budget", 2))
+        meter.raise_if_cancelled()
         verify_results: list = []
         for attempt in range(budget + 1):
             ad = jd / "attempts" / f"{attempt:02d}"
@@ -134,7 +155,9 @@ def build(request: str, skills, *, budget_usd: float | None = None, job_id: str 
                 verify_results = run["results"]
                 result["sandbox"] = run.get("sandbox")
                 audit = rpc("card_validator", "audit", card_validator.audit, raw=run["raw"])
-                collab = topo.check_generic(run["raw"], [a["name"] for a in art["agents"]], art["entry"])
+                names = [a["name"] for a in art["agents"]]
+                collab = topo.evaluate(run["raw"], names, art["entry"],
+                                       topology or topo.required_from_plan(plan, names), verify_results)
                 rec["collaboration"] = collab
                 rec["traffic"] = run["raw"].get("traffic")
                 rec["traffic_tap"] = run["raw"].get("traffic_tap")
@@ -142,8 +165,8 @@ def build(request: str, skills, *, budget_usd: float | None = None, job_id: str 
                 rec.update(verify=summ, card_audit=audit, load_errors=run["raw"].get("load_errors"))
                 _write(ad / "verify.json", {"results": verify_results, "raw": run["raw"], "stderr": run["stderr_tail"]})
                 fb = _feedback(static, verify_results, audit, run["raw"], run["stderr_tail"], skills)
-                fb += "".join(f"\n[collaboration] {c}" for c in collab)
-                if summ["passed"] == summ["cases"] and not audit and not static and not collab:
+                fb += "".join(f"\n[collaboration] {c['detail']}" for c in collab["failures"])
+                if summ["passed"] == summ["cases"] and not audit and not static and collab["status"] in COLLAB_OK:
                     result["attempts"].append(rec)
                     break
             result["attempts"].append(rec)
@@ -162,7 +185,8 @@ def build(request: str, skills, *, budget_usd: float | None = None, job_id: str 
             say("hidden")
             hid = rpc("runner", "run", harness.run, agents=art["agents"], entry=art["entry"], cases=hidden_tests)
             hs = harness.summarize(hid["results"])
-            tfails = topo.check_spec(topology, hid["raw"], [a["name"] for a in art["agents"]])
+            tfails = topo.check_spec(topology, hid["raw"], [a["name"] for a in art["agents"]], art["entry"],
+                                     hid["results"])
             result["hidden"] = {**hs, "solved": hs["passed"] == hs["cases"] and not tfails,
                                 "failures": harness_failures(hid["results"]) + tfails,
                                 "topology": {"required": topology, "traffic": hid["raw"].get("traffic"),
@@ -181,15 +205,23 @@ def build(request: str, skills, *, budget_usd: float | None = None, job_id: str 
             "static_clean": not final_static,
             "cards_clean": not last.get("card_audit") and not last.get("skipped_run"),
             "no_load_errors": not last.get("load_errors"),
-            "agents_collaborate": not last.get("collaboration"),
+            # FAIL CLOSED: a multi-agent build needs OBSERVED collaboration; missing observability = UNVERIFIED
+            "agents_collaborate": (last.get("collaboration") or {}).get("status") in COLLAB_OK,
         }
-        if len(art["agents"]) > 1 and not last.get("traffic_tap"):
-            result["verify_note"] = "inter-agent traffic not observable on this uagents version: collaboration unverified"
-        result["release_gate"] = {**gate, "static": final_static, "sandbox": result.get("sandbox")}
+        collab_final = last.get("collaboration") or {"status": topo.UNVERIFIED, "failures": [],
+                                                     "evidence": {"reason": "final attempt was never executed"}}
+        result["collaboration"] = collab_final
+        if collab_final["status"] == topo.UNVERIFIED:
+            result["verify_note"] = "inter-agent traffic not observable: collaboration UNVERIFIED, so the build is not verified"
+        result["release_gate"] = {**gate, "collaboration_status": collab_final["status"], "static": final_static,
+                                  "sandbox": result.get("sandbox")}
         ok = all(v for k, v in gate.items() if k != "examiner_tests_passed") and exam_passed == len(exam["cases"])
         result["status"] = "verified" if ok else "unverified"
     except llm.BudgetExceeded as e:
         result["status"] = "budget_exceeded"
+        result["error"] = str(e)
+    except llm.Cancelled as e:
+        result["status"] = "cancelled"
         result["error"] = str(e)
     except Exception as e:  # noqa: BLE001 - recorded as evidence, surfaced by Recovery
         result["status"] = "error"

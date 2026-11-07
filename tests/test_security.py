@@ -47,23 +47,43 @@ def test_evolution_cannot_switch_off_its_own_verifier():
 
 
 class FakeDeploy:
-    """Agentverse stand-in using the REAL Client.teardown logic."""
+    """Agentverse stand-in using the REAL Client.teardown / discoverable logic. Only HTTP is faked."""
     api = "v1"
 
-    def __init__(self, reply, fail_on_upload=None, never_running=False):
+    def __init__(self, reply, fail_on_upload=None, never_running=False, indexed=True, profile_ok=True,
+                 delete_silently_fails=False):
         self.reply, self.stopped, self.deleted, self.n = reply, [], [], 0
         self.fail_on_upload, self.never_running = fail_on_upload, never_running
+        self.indexed, self.profile_ok, self.delete_silently_fails = indexed, profile_ok, delete_silently_fails
+        self.live, self.uploaded = set(), {}
+
+    def get(self, a):
+        from foundry.agentverse import AgentverseError
+        if a not in self.live:
+            e = AgentverseError("HTTP 404")
+            e.status = 404
+            raise e
+        return {"running": True}
+
+    def search_agents(self, text, limit=15, semantic=True, retries=2):
+        return [{"address": a} for a in sorted(self.live)] if self.indexed else [{"address": "agent1qsomeoneelse"}]
+
+    def discoverable(self, address, queries, wait_s=0, every_s=20):
+        from foundry.agentverse import Client
+        return Client.discoverable(self, address, queries, wait_s=wait_s, every_s=every_s)
 
     def create(self, name):
         self.n += 1
+        self.live.add(f"agent1qdeployed{self.n}")
         return f"agent1qdeployed{self.n}"
 
     def upload(self, a, c):
+        self.uploaded[a] = c
         if self.fail_on_upload and a.endswith(str(self.fail_on_upload)):
             from foundry.agentverse import AgentverseError
             raise AgentverseError("HTTP 500 upload exploded")
 
-    def update_profile(self, *a): return True
+    def update_profile(self, *a): return self.profile_ok
     def start(self, a): pass
     def wait_running(self, a, timeout=60): return not self.never_running
 
@@ -72,6 +92,8 @@ class FakeDeploy:
 
     def delete(self, a):
         self.deleted.append(a)
+        if not self.delete_silently_fails:
+            self.live.discard(a)
 
     def teardown(self, addrs):
         from foundry.agentverse import Client
@@ -219,14 +241,16 @@ def test_agent_that_never_starts_is_not_released(sandbox):
 def test_collaboration_is_verified_from_observed_traffic():
     from foundry import topology
     topo = {"agents": ["catalog", "pricing", "desk"], "must_receive": ["catalog", "pricing"]}
-    real = {"traffic_tap": True, "traffic": [{"from": "client", "to": "desk", "type": "ChatMessage"},
-                                             {"from": "desk", "to": "catalog", "type": "Ask"},
-                                             {"from": "desk", "to": "pricing", "type": "Ask"}]}
-    assert topology.check_spec(topo, real, ["catalog", "pricing", "desk"]) == []
-    fake = {"traffic_tap": True, "traffic": [{"from": "client", "to": "desk", "type": "ChatMessage"}]}
-    fails = topology.check_spec(topo, fake, ["catalog", "pricing", "desk"])
+    real = {"traffic_tap": True, "receive_tap": True,
+            "received_log": [{"from": "client", "to": "desk", "type": "ChatMessage", "ok": True, "t": 1.0},
+                             {"from": "desk", "to": "catalog", "type": "Ask", "ok": True, "t": 1.1},
+                             {"from": "desk", "to": "pricing", "type": "Ask", "ok": True, "t": 1.2}]}
+    assert topology.check_spec(topo, real, ["catalog", "pricing", "desk"], "desk") == []
+    fake = {"traffic_tap": True, "receive_tap": True,
+            "received_log": [{"from": "client", "to": "desk", "type": "ChatMessage", "ok": True, "t": 1.0}]}
+    fails = topology.check_spec(topo, fake, ["catalog", "pricing", "desk"], "desk")
     assert len(fails) == 2 and all(f["code"] == "TOPOLOGY" for f in fails)
-    one_agent = topology.check_spec(topo, fake, ["main"])
+    one_agent = topology.check_spec(topo, fake, ["main"], "main")
     assert "were not built" in one_agent[0]["detail"]
     assert topology.check_generic(fake, ["desk", "catalog"], "desk")
 

@@ -19,7 +19,7 @@ from . import bench, config, ledger, llm, pipeline, skills as sk
 from .roles import evolver, judge, miner
 
 
-def build_dev(skillset, tag: str, limit: int | None = None) -> list[dict]:
+def build_dev(skillset, tag: str, limit: int | None = None, parent_meter=None) -> list[dict]:
     specs = bench.load("dev", purpose="learning")
     if limit:  # deterministic subset (sorted by id) for cheaper rounds
         specs = specs[:limit]
@@ -28,7 +28,7 @@ def build_dev(skillset, tag: str, limit: int | None = None) -> list[dict]:
         jid = f"dev_{skillset.version}_{spec['id']}{tag}"
         return pipeline.build(spec["request"], skillset, budget_usd=config.DEFAULT_BUDGET_USD, job_id=jid,
                               hidden_tests=spec["tests"], spec_id=spec["id"], out_dir=config.RUNS / "dev" / jid,
-                              topology=spec.get("topology"))
+                              topology=spec.get("topology"), parent_meter=parent_meter)
     with ThreadPoolExecutor(max_workers=config.PARALLEL_BUILDS) as ex:
         return list(ex.map(one, specs))
 
@@ -50,9 +50,10 @@ def gate(cur, cluster: dict, history: list, meter, repeats: int, say, origin: st
                   cluster={k: cluster[k] for k in ("code", "count", "spec_count", "root_cause") if k in cluster})
     cur_eval = _cached_promotion(cur.version)
     if cur_eval is None:
-        cur_eval = judge.evaluate(cur, purpose=f"promotion baseline for {cur.version}", repeats=repeats)
+        cur_eval = judge.evaluate(cur, purpose=f"promotion baseline for {cur.version}", repeats=repeats,
+                                  parent_meter=meter)
         ledger.append("promotion_eval", **cur_eval)
-    cand_eval = judge.evaluate(cand, purpose=f"promotion candidate {cand_id}", repeats=repeats)
+    cand_eval = judge.evaluate(cand, purpose=f"promotion candidate {cand_id}", repeats=repeats, parent_meter=meter)
     ledger.append("promotion_eval", **cand_eval)
     ok, reason = judge.decide(cur_eval, cand_eval)
     decision = {"candidate": cand_id, "parent": cur.version, "patch": patch, "reason": reason, "origin": origin,
@@ -87,8 +88,11 @@ def estimate_round(dev_limit: int | None, repeats: int, usd_per_build: float | N
 
 
 def run(rounds: int, repeats: int = 1, say=print, dev_limit: int | None = None, max_usd: float | None = None) -> None:
+    """max_usd is a HARD aggregate ceiling for this whole run: every build, the miner and the evolver reserve
+    against it, so once it is exhausted no further paid call is made (not just an estimate check)."""
     history = ledger.read("patch_decision")
-    meter = llm.CostMeter()
+    run_id = f"evolve_{int(time.time())}"
+    meter = llm.new_meter(max_usd, name=f"evolution run {run_id}", run_id=run_id)
     t_start = time.strftime("%Y-%m-%dT%H:%M:%S")
     for rnd in range(1, rounds + 1):
         est = estimate_round(dev_limit, repeats)
@@ -99,19 +103,30 @@ def run(rounds: int, repeats: int = 1, say=print, dev_limit: int | None = None, 
             break
         cur = sk.load()
         say(f"\n=== round {rnd}: current skills {cur.version} ({cur.prompt_tokens()} prompt tokens) ===")
-        dev = build_dev(cur, tag=f"_r{len(history)}", limit=dev_limit)
+        dev = build_dev(cur, tag=f"_r{len(history)}", limit=dev_limit, parent_meter=meter)
+        if any(b["status"] in ("budget_exceeded", "cancelled") for b in dev) and meter.headroom() == 0:
+            say(f"STOP: evolution run budget ${max_usd} exhausted during dev builds; no patch is proposed from a "
+                "partial round")
+            ledger.append("dev_round_aborted", version=cur.version, reason="run budget exhausted", run_id=run_id)
+            break
         solved = sum(1 for b in dev if (b.get("hidden") or {}).get("solved"))
         say(f"dev: {solved}/{len(dev)} tasks solved, ${sum(b['cost']['total_usd'] for b in dev):.3f}")
         ledger.append("dev_round", version=cur.version, solved=solved, tasks=len(dev),
                       usd=round(sum(b["cost"]["total_usd"] for b in dev), 4))
-        cluster = miner.mine(dev, cur, meter)
-        if not cluster:
-            say("no failures on dev: nothing to learn this round")
+        try:
+            cluster = miner.mine(dev, cur, meter)
+            if not cluster:
+                say("no failures on dev: nothing to learn this round")
+                break
+            say(f"miner: top cluster {cluster['code']} x{cluster['count']} over {cluster['spec_count']} tasks")
+            say(f"  root cause: {cluster.get('root_cause', '')[:240]}")
+            gate(cur, cluster, history, meter, repeats, say, origin=f"dev round on {cur.version}")
+        except llm.BudgetExceeded as e:
+            say(f"STOP: evolution run budget reached ({e}); the candidate (if any) stays unpromoted")
+            ledger.append("evolution_budget_stop", run_id=run_id, error=str(e)[:300])
             break
-        say(f"miner: top cluster {cluster['code']} x{cluster['count']} over {cluster['spec_count']} tasks")
-        say(f"  root cause: {cluster.get('root_cause', '')[:240]}")
-        gate(cur, cluster, history, meter, repeats, say, origin=f"dev round on {cur.version}")
-    say(f"\nbuild spend this run: ${spent_since(t_start)} · meta-cost (miner+evolver): ${meter.total_usd:.3f}")
+    say(f"\nrun {run_id}: total model spend ${meter.total_usd:.4f}"
+        + (f" of ${max_usd:.2f} ceiling" if max_usd is not None else "") + f" (builds ${spent_since(t_start)})")
 
 
 def job_failures(job_id: str) -> list[dict]:
@@ -133,7 +148,7 @@ def job_failures(job_id: str) -> list[dict]:
     return out
 
 
-def learn_from_job(job_id: str, repeats: int = 1, say=print) -> dict | None:
+def learn_from_job(job_id: str, repeats: int = 1, say=print, max_usd: float | None = None) -> dict | None:
     """Live self-improvement from ONE build: the defects caught while building job_id become one
     patch to FOUNDRY itself, which must beat the sealed promotion set (tasks it has never seen
     while learning) with zero regressions, or it is rolled back."""
@@ -142,7 +157,8 @@ def learn_from_job(job_id: str, repeats: int = 1, say=print) -> dict | None:
         say(f"{job_id}: the verifier caught no defects during this build, so there is nothing to learn from it")
         return None
     cur = sk.load()
-    meter = llm.CostMeter()
+    meter = llm.new_meter(max_usd if max_usd is not None else _env_cap("FOUNDRY_LEARN_MAX_USD"),
+                          name=f"learn from {job_id}", run_id=f"learn_{job_id}")
     pseudo = [{"job_id": job_id, "spec_id": job_id, "status": "verified", "hidden": {"failures": fails}}]
     cluster = miner.mine(pseudo, cur, meter)
     say(f"miner: {cluster['code']} x{cluster['count']} caught in {job_id}; root cause: {cluster.get('root_cause', '')[:200]}")
@@ -150,6 +166,11 @@ def learn_from_job(job_id: str, repeats: int = 1, say=print) -> dict | None:
     d = gate(cur, cluster, history, meter, repeats, say, origin=f"live build {job_id}")
     d["meta_usd"] = meter.total_usd
     return d
+
+
+def _env_cap(name):
+    v = config.env(name)
+    return float(v) if v else None
 
 
 def _lessons_only_arm(base, cur):
