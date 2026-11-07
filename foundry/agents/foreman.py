@@ -650,8 +650,14 @@ class Foreman:
         ledger.append("contract_approved", job_id=job["job_id"], by=sender, contract_sha256=(c or {}).get("sha256"),
                       min_agents=(c or {}).get("min_agents"))
         if payments.enabled():
-            co = await asyncio.to_thread(payments.create_checkout, job["quote"]["price_usd"], job["job_id"],
-                                         sender, job["request"])
+            try:
+                co = await asyncio.to_thread(payments.create_checkout, job["quote"]["price_usd"], job["job_id"],
+                                             sender, job["request"])
+            except Exception as e:  # noqa: BLE001 - a payment-provider problem must not block the user
+                ledger.append("payment_unavailable", job_id=job["job_id"], error=str(e)[:300])
+                await ctx.send(sender, chat(f"Stripe checkout is unavailable right now ({str(e)[:160]}), so this "
+                                            "build runs in demo mode with no charge."))
+                return await self.start_build(ctx, sender, job)
             self._update(job, status="awaiting_payment", checkout_id=co["checkout_session_id"],
                          expected_cents=co["amount_cents"])
             kw = dict(accepted_funds=[Funds(currency="USD", amount=f"{job['quote']['price_usd']:.2f}",
@@ -663,9 +669,36 @@ class Foreman:
             except Exception:  # noqa: BLE001 - older protocol versions lack these fields
                 req = RequestPayment(**kw)
             await ctx.send(sender, req)
-            ledger.append("payment_requested", job_id=job["job_id"], usd=job["quote"]["price_usd"])
-            return await ctx.send(sender, chat("Complete the test-mode checkout and I'll start immediately."))
+            ledger.append("payment_requested", job_id=job["job_id"], usd=job["quote"]["price_usd"],
+                          variant=co.get("variant"))
+            asyncio.get_running_loop().create_task(self._watch_payment(sender, job))
+            link = f"\n\nIf the checkout doesn't open here, pay at: {co['url']}" if co.get("url") else ""
+            return await ctx.send(sender, chat("Complete the Stripe test checkout (card 4242 4242 4242 4242, any future "
+                                               "date, any CVC) and I'll start immediately; I verify the payment with "
+                                               f"Stripe myself.{link}"))
         await self.start_build(ctx, sender, job)
+
+    async def _watch_payment(self, sender, job, every_s: float = 4.0, for_s: float = 1800):
+        """Start the build as soon as Stripe says the session is paid, even if no CommitPayment arrives."""
+        t_end = time.time() + for_s
+        while time.time() < t_end and job.get("status") == "awaiting_payment" and not job.get("paid"):
+            await asyncio.sleep(every_s)
+            try:
+                ok, _ = await asyncio.to_thread(payments.verify, job["checkout_id"], job["job_id"], job["expected_cents"])
+            except Exception:  # noqa: BLE001 - transient Stripe/network error: keep watching
+                continue
+            if ok and job.get("status") == "awaiting_payment" and not job.get("paid"):
+                tx = job["checkout_id"]
+                self.paid_tx.add(tx)
+                self._update(job, paid=True, paid_tx=tx)
+                ledger.append("payment_completed", job_id=job["job_id"], tx=tx, verified_with="stripe (polled)")
+                c = self.sessions.get(sender) or self.ctx
+                try:
+                    await c.send(sender, CompletePayment(transaction_id=tx))
+                except Exception:  # noqa: BLE001
+                    pass
+                self._update(job, status="quoted")
+                return await self.start_build(c, sender, job)
 
     async def on_commit(self, ctx, sender, msg: CommitPayment):
         tx = msg.transaction_id
