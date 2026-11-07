@@ -36,6 +36,37 @@ def _cached_promotion(version: str):
     return None
 
 
+def gate(cur, cluster: dict, history: list, meter, repeats: int, say, origin: str) -> dict:
+    """Propose ONE patch for `cluster`, test it on the sealed promotion set, promote or roll back."""
+    patch = evolver.propose(cluster, cur, meter, history)
+    cand_id = f"c{len(history) + 1:04d}"
+    cand = sk.make_candidate(cur, patch, cand_id)
+    say(f"evolver: {patch['kind']} {patch.get('file', patch.get('config_changes', ''))} :: {patch.get('rationale', '')[:160]}")
+    ledger.append("patch_proposed", candidate=cand_id, parent=cur.version, patch=patch, origin=origin,
+                  cluster={k: cluster[k] for k in ("code", "count", "spec_count", "root_cause") if k in cluster})
+    cur_eval = _cached_promotion(cur.version)
+    if cur_eval is None:
+        cur_eval = judge.evaluate(cur, purpose=f"promotion baseline for {cur.version}", repeats=repeats)
+        ledger.append("promotion_eval", **cur_eval)
+    cand_eval = judge.evaluate(cand, purpose=f"promotion candidate {cand_id}", repeats=repeats)
+    ledger.append("promotion_eval", **cand_eval)
+    ok, reason = judge.decide(cur_eval, cand_eval)
+    decision = {"candidate": cand_id, "parent": cur.version, "patch": patch, "reason": reason, "origin": origin,
+                "root_cause": cluster.get("root_cause"), "current": judge.public(cur_eval),
+                "candidate_eval": judge.public(cand_eval), "diff": sk.diff_summary(cur, cand)}
+    if ok:
+        new_v = sk.promote(cand)
+        ledger.append("promotion_eval", **{**cand_eval, "version": new_v})
+        decision.update(decision="promoted", new_version=new_v)
+        say(f"PROMOTED -> {new_v}: {reason}")
+    else:
+        decision.update(decision="rejected")
+        say(f"REJECTED (rolled back to {cur.version}): {reason}")
+    ledger.append("patch_decision", **decision)
+    history.append(decision)
+    return decision
+
+
 def run(rounds: int, repeats: int = 1, say=print) -> None:
     history = ledger.read("patch_decision")
     meter = llm.CostMeter()
@@ -47,53 +78,82 @@ def run(rounds: int, repeats: int = 1, say=print) -> None:
         say(f"dev: {solved}/{len(dev)} tasks solved, ${sum(b['cost']['total_usd'] for b in dev):.3f}")
         ledger.append("dev_round", version=cur.version, solved=solved, tasks=len(dev),
                       usd=round(sum(b["cost"]["total_usd"] for b in dev), 4))
-
         cluster = miner.mine(dev, cur, meter)
         if not cluster:
             say("no failures on dev: nothing to learn this round")
             break
         say(f"miner: top cluster {cluster['code']} x{cluster['count']} over {cluster['spec_count']} tasks")
         say(f"  root cause: {cluster.get('root_cause', '')[:240]}")
-
-        patch = evolver.propose(cluster, cur, meter, history)
-        cand_id = f"c{len(history) + 1:04d}"
-        cand = sk.make_candidate(cur, patch, cand_id)
-        say(f"evolver: {patch['kind']} {patch.get('file', patch.get('config_changes', ''))} :: {patch.get('rationale', '')[:160]}")
-        ledger.append("patch_proposed", candidate=cand_id, parent=cur.version, patch=patch,
-                      cluster={k: cluster[k] for k in ("code", "count", "spec_count", "root_cause") if k in cluster})
-
-        cur_eval = _cached_promotion(cur.version)
-        if cur_eval is None:
-            cur_eval = judge.evaluate(cur, purpose=f"promotion baseline for {cur.version}", repeats=repeats)
-            ledger.append("promotion_eval", **cur_eval)
-        cand_eval = judge.evaluate(cand, purpose=f"promotion candidate {cand_id}", repeats=repeats)
-        ledger.append("promotion_eval", **cand_eval)
-        ok, reason = judge.decide(cur_eval, cand_eval)
-        decision = {"candidate": cand_id, "parent": cur.version, "patch": patch, "reason": reason,
-                    "current": judge.public(cur_eval), "candidate_eval": judge.public(cand_eval),
-                    "diff": sk.diff_summary(cur, cand)}
-        if ok:
-            new_v = sk.promote(cand)
-            ledger.append("promotion_eval", **{**cand_eval, "version": new_v})
-            decision.update(decision="promoted", new_version=new_v)
-            say(f"PROMOTED -> {new_v}: {reason}")
-        else:
-            decision.update(decision="rejected")
-            say(f"REJECTED (rolled back to {cur.version}): {reason}")
-        ledger.append("patch_decision", **decision)
-        history.append(decision)
+        gate(cur, cluster, history, meter, repeats, say, origin=f"dev round on {cur.version}")
     say(f"\nmeta-cost of evolution (miner+evolver): ${meter.total_usd:.3f}")
 
 
+def job_failures(job_id: str) -> list[dict]:
+    """Every defect the independent verifier caught during a build, INCLUDING ones the repair
+    loop later fixed. Fixing the app is not enough; these are what FOUNDRY learns from."""
+    from .dsl import failures
+    out = []
+    for vf in sorted((config.RUNS / job_id / "attempts").glob("*/verify.json")):
+        data = json.loads(vf.read_text())
+        for f in failures(data.get("results", [])):
+            out.append({**f, "attempt": vf.parent.name})
+        for name, tb in ((data.get("raw") or {}).get("load_errors") or {}).items():
+            out.append({"code": "LOAD_ERROR", "case": name, "send": "", "detail": tb[-400:], "attempt": vf.parent.name})
+    for sf in sorted((config.RUNS / job_id / "attempts").glob("*/feedback.txt")):
+        for line in sf.read_text().splitlines():
+            if line.startswith("[static:") or line.startswith("[card-audit:"):
+                code = "STATIC_VIOLATION" if line.startswith("[static:") else "CARD_INVALID"
+                out.append({"code": code, "case": "-", "send": "", "detail": line[:400], "attempt": sf.parent.name})
+    return out
+
+
+def learn_from_job(job_id: str, repeats: int = 1, say=print) -> dict | None:
+    """Live self-improvement from ONE build: the defects caught while building job_id become one
+    patch to FOUNDRY itself, which must beat the sealed promotion set (tasks it has never seen
+    while learning) with zero regressions, or it is rolled back."""
+    fails = job_failures(job_id)
+    if not fails:
+        say(f"{job_id}: the verifier caught no defects during this build, so there is nothing to learn from it")
+        return None
+    cur = sk.load()
+    meter = llm.CostMeter()
+    pseudo = [{"job_id": job_id, "spec_id": job_id, "status": "verified", "hidden": {"failures": fails}}]
+    cluster = miner.mine(pseudo, cur, meter)
+    say(f"miner: {cluster['code']} x{cluster['count']} caught in {job_id}; root cause: {cluster.get('root_cause', '')[:200]}")
+    history = ledger.read("patch_decision")
+    d = gate(cur, cluster, history, meter, repeats, say, origin=f"live build {job_id}")
+    d["meta_usd"] = meter.total_usd
+    return d
+
+
+def _lessons_only_arm(base, cur):
+    """Ablation: baseline routing, tools and repair budget plus ONLY the learned lessons. This
+    is the 'same models, same budget, with vs without evolved skills' comparison."""
+    import shutil
+    dest = sk.CANDIDATES / f"ablation_{cur.version}"
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(cur.path, dest)
+    (dest / "config.json").write_text((base.path / "config.json").read_text())
+    return sk.load(f"{cur.version}-lessons-only", dest)
+
+
 def evaluate_final(repeats: int = 2, say=print) -> dict:
-    """Baseline (v0000) vs current on the untouched final set. Run this ONCE, at the end."""
+    """Run ONCE, at the end, on the untouched final set. Same budget cap for every arm.
+      baseline       v0000: what an ordinary coding agent gets
+      evolved        current version as promoted
+      lessons-only   baseline models/tools/budget + learned lessons (controls for routing/budget)"""
     base = sk.load(sk.BASELINE)
     cur = sk.load()
+    arms = [base] if cur.version == base.version else [base, cur]
+    if cur.version != base.version and cur.config != base.config:
+        arms.append(_lessons_only_arm(base, cur))
     out = {}
-    for s in (base, cur) if cur.version != base.version else (base,):
-        say(f"final eval: {s.version} x{repeats} ...")
+    for s in arms:
+        say(f"final eval: {s.version} x{repeats} (budget cap ${config.DEFAULT_BUDGET_USD}/build) ...")
         agg = judge.evaluate(s, split="final", purpose=f"final evaluation {s.version}", repeats=repeats, tag="_final")
-        out[s.version] = judge.public(agg)
+        out[s.version] = {**judge.public(agg), "routing": s.config.get("routing"),
+                          "repair_budget": s.config.get("repair_budget"), "lessons": len(s.lessons)}
         say(json.dumps(out[s.version]))
     ledger.append("final_eval", results=out, final_hash=bench.split_hash("final"))
     (config.EVIDENCE / "final_eval.json").write_text(json.dumps(out, indent=1))

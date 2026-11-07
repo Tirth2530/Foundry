@@ -133,7 +133,8 @@ class Foreman:
             req = str(sel.get("request", "")).strip()
             budget = sel.get("budget")
             return await self.quote(ctx, sender, req, budget)
-        if action in ("approve_quote", "reject_quote", "publish", "evidence", "reuse", "build_new") and jid not in self.jobs:
+        if action in ("approve_quote", "reject_quote", "publish", "evidence", "reuse", "build_new", "learn") \
+                and jid not in self.jobs:
             return await ctx.send(sender, chat(f"I couldn't find job {jid}. Say 'status' to see your jobs."))
         handlers = {
             "approve_quote": lambda: self.approve(ctx, sender, self.jobs[jid]),
@@ -142,6 +143,8 @@ class Foreman:
             "reject_quote": lambda: self.reject(ctx, sender, self.jobs[jid]),
             "publish": lambda: self.publish(ctx, sender, self.jobs[jid]),
             "evidence": lambda: self.evidence(ctx, sender, self.jobs[jid]),
+            "learn": lambda: self.learn(ctx, sender, self.jobs[jid]),
+            "scoreboard": lambda: self.scoreboard(ctx, sender),
             "status": lambda: self.status(ctx, sender),
             "history": lambda: self.history(ctx, sender),
             "evolve": lambda: self.evolve(ctx, sender),
@@ -171,6 +174,8 @@ class Foreman:
                 return "build_new", jid
             if "publish" in low or "deploy" in low:
                 return "publish", jid
+            if "learn" in low or "teach" in low:
+                return "learn", jid
             if "evidence" in low or "detail" in low or "proof" in low:
                 return "evidence", jid
             if any(w in low for w in ("approve", "confirm", "accept", "go ahead", "proceed")):
@@ -181,6 +186,8 @@ class Foreman:
         m = re.match(r"rollback\s+(v\d{4})", low)
         if m:
             return "rollback", m.group(1)
+        if any(w in low for w in ("scoreboard", "results", "baseline", "how much better", "prove you improved")):
+            return "scoreboard", None
         if low in ("status", "my jobs", "jobs") or low.startswith("status"):
             return "status", None
         if any(w in low for w in ("evolution", "history", "versions", "changelog", "what have you learned")):
@@ -429,7 +436,9 @@ class Foreman:
         ctas = [("Show evidence", {"action": "evidence", "job_id": job["job_id"]}, not ok)]
         if ok:
             ctas.insert(0, ("Publish to Agentverse", {"action": "publish", "job_id": job["job_id"]}, True))
-        ctas.append(("Teach FOUNDRY (evolve)", {"action": "evolve"}, False))
+        if any(not a.get("skipped_run") and (a.get("verify") or {}).get("passed", 0) < (a.get("verify") or {}).get("cases", 0)
+               or a.get("static") for a in attempts):
+            ctas.append(("Teach FOUNDRY from this build", {"action": "learn", "job_id": job["job_id"]}, False))
         ev = res.get("evidence", {})
         md = cards.detail(f"{'Verified' if ok else 'Not verified'} · {job['job_id']}", [
             ("Status", res["status"].upper()),
@@ -561,6 +570,64 @@ class Foreman:
                 self.evolving.release()
         threading.Thread(target=work, daemon=True).start()
 
+    async def learn(self, ctx, sender, job):
+        if not self.evolving.acquire(blocking=False):
+            return await ctx.send(sender, chat("I'm already learning from another build. I'll report when it's done."))
+        await ctx.send(sender, chat(
+            f"Learning from {job['job_id']}. Fixing that app wasn't enough, so I'm turning the defects my verifier "
+            "caught into ONE change to my own engineering skills. It only stays if it solves more tasks on my sealed "
+            "promotion set (tasks I never see while learning) with zero regressions. Otherwise it's rolled back."))
+
+        def work():
+            try:
+                d = pipeline.rpc("evolver", "learn", lambda job_id: _direct_learn(job_id), job_id=job["job_id"])
+                self.later(sender, self.learn_message(job, d))
+            except Exception as e:  # noqa: BLE001
+                self.later(sender, chat(f"Learning failed: {e}. My skills are unchanged."))
+            finally:
+                self.evolving.release()
+        threading.Thread(target=work, daemon=True).start()
+
+    def learn_message(self, job, d) -> ChatMessage:
+        if not d:
+            return chat(f"The verifier caught no defects while building {job['job_id']}, so there's nothing to learn.")
+        cu, ce, p = d["current"], d["candidate_eval"], d["patch"]
+        promoted = d["decision"] == "promoted"
+        md = cards.detail(f"{'Promoted' if promoted else 'Rolled back'} · {d['candidate']}", [
+            ("Learned from", f"defects caught while building {job['job_id']}"),
+            ("Root cause", str(d.get("root_cause") or "")[:220]),
+            ("Change to FOUNDRY", f"{p.get('kind')} {p.get('file', '') or json.dumps(p.get('config_changes', {}))}"[:200]),
+            ("Sealed promotion set", f"{cu.get('solved')}/{cu.get('tasks')} → {ce.get('solved')}/{ce.get('tasks')} tasks solved"),
+            ("Cost per build", f"${cu.get('usd_per_build', 0):.3f} → ${ce.get('usd_per_build', 0):.3f}"),
+            ("Decision", (f"PROMOTED to {d.get('new_version')}: " if promoted else "ROLLED BACK: ") + d["reason"]),
+        ], [("How FOUNDRY has evolved", {"action": "history"}, True),
+            ("Scoreboard", {"action": "scoreboard"}, False)])
+        return chat("The new skill generalised to unseen tasks, so it's now part of how I build." if promoted else
+                    "The change didn't beat the sealed set, so I rolled it back. I keep rejected ideas as evidence.", md)
+
+    async def scoreboard(self, ctx, sender):
+        rows = []
+        fe = config.EVIDENCE / "final_eval.json"
+        if fe.exists():
+            res = json.loads(fe.read_text())
+            for v, r in res.items():
+                rows.append((f"Final set · {v}", f"{r['solved']}/{r['tasks']} tasks · {r['case_pass']}/{r['case_total']} "
+                                                 f"cases · ${r['usd_per_build']:.3f}/build"))
+        evals = {e["version"]: e for e in ledger.read("promotion_eval") if str(e.get("version", "")).startswith("v")}
+        for v in sorted(evals):
+            e = evals[v]
+            rows.append((f"Promotion set · {v}", f"{e['solved']}/{e['tasks']} tasks · ${e['usd_per_build']:.3f}/build"))
+        ds = ledger.read("patch_decision")
+        rows += [("Self-changes", f"{len(ds)} proposed · {sum(d['decision'] == 'promoted' for d in ds)} promoted · "
+                                  f"{sum(d['decision'] == 'rejected' for d in ds)} rolled back"),
+                 ("Final set opened", f"{len(ledger.read('final_set_opened'))} time(s), content hash recorded"),
+                 ("Ledger", f"{ledger.verify_chain()[1]} hash-chained records, chain "
+                            f"{'intact' if ledger.verify_chain()[0] else 'BROKEN'}")]
+        if len(rows) <= 3:
+            return await ctx.send(sender, chat("No measured results yet. Say 'evolve' to run a round."))
+        await ctx.send(sender, chat("Baseline vs evolved, all measured with the same budget cap per build:",
+                                    cards.detail("FOUNDRY scoreboard", rows, [("History", {"action": "history"}, False)])))
+
     async def rollback(self, ctx, sender, version):
         try:
             sk.rollback(version)
@@ -568,6 +635,11 @@ class Foreman:
             return await ctx.send(sender, chat(f"No skill version {version}."))
         ledger.append("rollback", to=version, by=sender)
         await ctx.send(sender, chat(f"Rolled back. FOUNDRY now builds with {version}."))
+
+
+def _direct_learn(job_id):
+    from .. import evolve
+    return evolve.learn_from_job(job_id, say=lambda *_: None)
 
 
 def _direct_round():

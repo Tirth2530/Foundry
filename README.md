@@ -27,6 +27,29 @@ key), and the systems that build them rarely learn from those failures. FOUNDRY 
    promotion set with zero regressions**. Otherwise it is rolled back. A separate **final set** stays untouched until
    the end, and every time it's opened is recorded in a hash-chained ledger.
 
+## Why this isn't "Agentverse's generator again"
+Agentverse can already generate an agent from a prompt. FOUNDRY adds what a generator doesn't do:
+- **Verifies:** a different model family writes tests from the request only; generated agents are run as Agentverse
+  hosts them; every card is audited; only verified builds publish; the live agent is called by a third party.
+- **Learns:** defects caught during a build become ONE change to FOUNDRY's own skills, kept only if it solves more
+  *unseen* sealed tasks with zero regressions, and rolled back otherwise (`learn`, `evolve`).
+- **Proves it improved:** the same budget cap per build for baseline vs evolved on an untouched final set, plus a
+  lessons-only arm that keeps the baseline's models and budget, so the gain can't come from a bigger model or more
+  retries. Rejected changes are shown, not hidden.
+
+## Demo script (the six beats judges should see)
+1. In ASI:One a judge asks for a new multi-agent app → Scout searches Agentverse first → quote card → approve.
+2. Live build progress; the **independent verifier catches a real defect** (attempt 1 fails, with the reason).
+3. FOUNDRY repairs the app → **Verified** card.
+4. Tap **Teach FOUNDRY from this build** → the defect becomes one change to FOUNDRY's skills.
+5. The change is tested on the **sealed promotion set** (tasks never seen while learning) → promoted or rolled back,
+   with the numbers.
+6. **Publish** → live third-party call → someone else @mentions the agent and uses it. Close on **scoreboard**:
+   baseline v0000 vs the evolved version on the untouched final set, same budget, rejected changes included.
+
+Line to remember: *"Other AI systems build agents. FOUNDRY builds agents, learns from its own failures, and proves
+it's becoming a better engineer."*
+
 ## The 16 agents
 
 | Agent | Job | Trust boundary |
@@ -68,12 +91,13 @@ cp .env.example .env                                        # then fill in the k
 ## Run it: gates first, then the show
 
 ```bash
-python -m pytest -q tests          # 18 offline tests, $0: validators, pipeline, evolution, gate, rollback, chat flow
+python -m pytest -q tests          # 22 offline tests, $0: validators, pipeline, evolution, gate, rollback, chat flow
 python -m foundry doctor           # packages + a 1-token call to each model + Agentverse key check
 python -m foundry gate1            # GATE 1: create + deploy + independently invoke a new hosted agent  -> evidence/gate1.json
 python -m foundry selftest         # GATE 2: the runner catches real defects in a known agent (no LLM)  -> evidence/gate2_selftest.json
 python -m foundry build "Base64 tool. 'encode <text>' replies 'base64: <encoded>'..."   # one real verified build
 python -m foundry evolve --rounds 3   # GATE 3: self-improvement against the sealed promotion set
+python -m foundry learn job_xxxxxx # live: one build's caught defects -> one skill change -> sealed gate decides
 python -m foundry history          # every patch, the numbers, promoted or rolled back
 python -m foundry serve            # the 16-agent network; Foreman goes live for ASI:One
 ```
@@ -82,8 +106,9 @@ python -m foundry serve            # the 16-agent network; Foreman goes live for
 Mailbox**, then in Agentverse give the agent a handle (for example `@foundry`), an avatar, and paste
 `README_AGENT.md` as its README. Chat with it from https://asi1.ai.
 
-**At the end (run once):** `python -m foundry eval-final --repeats 2` compares the baseline `v0000` with the evolved
-version on the untouched final set. Then `python -m foundry report` writes `evidence/report.md` with all numbers,
+**At the end (run once):** `python -m foundry eval-final --repeats 2` compares the baseline `v0000`, the evolved
+version, and (if evolution changed models or budget) a lessons-only arm, on the untouched final set with the same
+budget cap per build. Then `python -m foundry report` writes `evidence/report.md` with all numbers,
 computed from the ledger.
 
 ## What to say in ASI:One
@@ -95,6 +120,7 @@ computed from the ledger.
   (**Use this agent** for $0, or **Build a new one**).
 - "history" → carousel of every self-change, with promotion-set scores, including rejected ones.
 - "evolve" → runs one evolution round and reports the decision.
+- "scoreboard" → baseline vs evolved, cost per build, changes proposed, promoted and rolled back.
 - "rollback v0001" → move to an earlier skill version.
 
 ## Costs (measured, not guessed)

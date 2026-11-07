@@ -36,7 +36,7 @@ def sandbox(tmp_path, monkeypatch):
     for p in config.PROVIDERS.values():
         monkeypatch.setitem(p, "api_key", "test")
 
-    calls = {"n": 0}
+    calls = {"n": 0, "strict": False}  # strict: the examiner's card test (e1b) also catches the bad card
 
     def fake_chat(messages, *, provider, role, meter=None, **kw):
         calls["n"] += 1
@@ -84,7 +84,8 @@ def sandbox(tmp_path, monkeypatch):
         good = "approve_cta" in agents[0]["code"]
         results = []
         for c in cases:
-            ok = (good or c["name"].startswith(("e1", "adv"))) and c["name"] != "two_lines"  # one dev task never passes
+            lenient = c["name"].startswith("adv") or c["name"] == "e1" or (c["name"] == "e1b" and not calls["strict"])
+            ok = (good or lenient) and c["name"] != "two_lines"  # one dev task never passes
             checks = [{"type": "card", "ok": ok, "code": "" if ok else "CARD_INVALID",
                        "detail": "" if ok else "review missing 'approve_cta' (found keys: ['buttons'])"}]
             results.append({"name": c["name"], "passed": ok,

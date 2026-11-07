@@ -7,6 +7,7 @@
   serve [--direct]           run the agent network (Foreman on ASI:One + 14 role agents)
   evolve --rounds N          Gate 3: self-improvement rounds (dev -> patch -> sealed promotion gate)
   eval-final [--repeats 2]   baseline v0000 vs current on the untouched final set (run once, at the end)
+  learn job_xxxxxx           live self-improvement from ONE build's caught defects (sealed gate decides)
   history                    every patch FOUNDRY proposed, and what the gate decided
   rollback vNNNN             point CURRENT back to an earlier skill version
   claim job_xxxxxx           deploy a verified build into YOUR Agentverse account (CLAIM_AGENTVERSE_API_KEY)
@@ -150,6 +151,11 @@ def cmd_eval_final(a):
     print(json.dumps(evolve.evaluate_final(a.repeats), indent=1))
 
 
+def cmd_learn(a):
+    from . import evolve
+    print(json.dumps(evolve.learn_from_job(a.job), indent=1, default=str))
+
+
 def cmd_history(_):
     from . import ledger, skills as sk
     print(f"current: {sk.current_version()}  versions: {sk.list_versions()}")
@@ -251,6 +257,8 @@ def main():
     f = sub.add_parser("eval-final")
     f.add_argument("--repeats", type=int, default=2)
     sub.add_parser("history")
+    le = sub.add_parser("learn")
+    le.add_argument("job")
     r = sub.add_parser("rollback")
     r.add_argument("version")
     c = sub.add_parser("claim")
@@ -264,7 +272,7 @@ def main():
     a = ap.parse_args()
     {"doctor": cmd_doctor, "gate1": cmd_gate1, "selftest": cmd_selftest, "build": cmd_build, "serve": cmd_serve,
      "evolve": cmd_evolve, "eval-final": cmd_eval_final, "history": cmd_history, "rollback": cmd_rollback,
-     "claim": cmd_claim, "report": cmd_report, "lint": cmd_lint, "search": cmd_search,
+     "claim": cmd_claim, "learn": cmd_learn, "report": cmd_report, "lint": cmd_lint, "search": cmd_search,
      "scout": cmd_scout}[a.cmd](a)
 
 

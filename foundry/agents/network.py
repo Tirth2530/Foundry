@@ -66,7 +66,8 @@ REGISTRY = {
     "recovery": {"decide": (_recovery_decide, False)},
     "miner": {"mine": (_miner_mine, True)},
     "judge": {"evaluate": (_judge_eval, False)},
-    "evolver": {"round": (_evolve_round, False)},
+    "evolver": {"round": (_evolve_round, False),
+                "learn": (lambda job_id: __import__("foundry.evolve", fromlist=["x"]).learn_from_job(job_id, say=lambda *_: None), False)},
 }
 
 TIMEOUTS = {"scout": 400, "runner": 900, "builder": 400, "publisher": 400, "judge": 7200, "evolver": 14400}
