@@ -89,22 +89,23 @@ def _rpc(role: str, op: str, fn, *, skills=None, meter=None, events=None, **kw):
     grant = None
     if meter is not None and role in LLM_ROLES | {"miner"}:
         # The role agent spends on our behalf: reserve its whole allowance in OUR budget chain first, so
-        # concurrent jobs/role calls can never jointly overspend; the unused part is released afterwards.
+        # concurrent jobs/role calls can never jointly overspend. The role agent's own meter is capped at this
+        # allowance. Afterwards the grant is released AND the reported usage committed in one atomic step.
         meter.raise_if_cancelled()
         room = meter.headroom()
         if room is not None and room <= 0:
             raise llm.BudgetExceeded(f"no budget left for {role}.{op}")
-        if room is not None:
-            grant = meter.reserve(room)
-            payload["cap_remaining"] = room
+        grant = meter.reserve(room if room is not None else 0.0)
+        payload["cap_remaining"] = room
+    res = None
     try:
         res = TRANSPORT(role, payload)
     finally:
+        reported = res.get("calls") if isinstance(res, dict) and "calls" in res else None
         if grant is not None:
-            meter.settle(grant, None)
-    for c in res.get("calls", []):
-        if meter is not None:
-            meter.add(c)
+            meter.settle_grant(grant, reported)
+        elif reported and meter is not None:  # a non-LLM role reported spend: book it, never drop it
+            meter.settle_grant(meter.reserve(0.0), reported)
     if events is not None:
         events.extend(res.get("events", []))
         events.append({"rpc": f"{role}.{op}", "ok": res.get("ok"), "ms": res.get("ms")})

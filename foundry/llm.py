@@ -123,8 +123,31 @@ class CostMeter:
                     raise BudgetExceeded(f"{m.name} budget cap ${m.cap_usd:.2f}: ${m.spent:.4f} spent, "
                                          f"${m.reserved:.4f} reserved, next call needs ${upcoming_usd:.4f}")
 
+    def settle_grant(self, grant: dict, calls: list | None) -> dict:
+        """Close a GRANT (an allowance reserved for a remote role agent) in ONE atomic step: release the
+        reservation AND commit the usage the agent reported, under the same lock, so no other thread can take
+        the released headroom before the spend is booked.
+
+        calls=None means the agent never reported (timeout, crash, lost reply). Its spend is unknown, so the WHOLE
+        grant is committed as an 'unreconciled' charge rather than assumed to be zero. Spend above the grant (a
+        provider overrun) is committed and recorded in `overruns`; it is the only way a cap can be exceeded."""
+        with _BUDGET_LOCK:
+            if calls is None:
+                calls = [{"role": "unreconciled", "provider": "unknown", "model": "unknown", "tokens_in": 0,
+                          "tokens_out": 0, "usd": grant["usd"], "usage_source": "unreconciled",
+                          "note": "role agent did not report usage; full grant charged"}]
+            actual = sum((c.get("usd") or 0.0) for c in calls)
+            for m in grant["levels"]:
+                m.reserved = max(0.0, m.reserved - grant["usd"])
+                m.spent += actual
+            self.calls.extend(calls)
+            if actual > grant["usd"] + 1e-9:
+                self.overruns.append({"reserved": grant["usd"], "actual": actual, "kind": "grant"})
+        return {"committed_usd": actual, "unreconciled": any(c.get("usage_source") == "unreconciled" for c in calls)}
+
     def add(self, rec: dict) -> None:
-        """Record a call that was already paid (e.g. reported back by a role agent) and roll it up."""
+        """Book spend that was NOT reserved through this meter. It is not checked against the caps, so FOUNDRY code
+        must not use it for remote spend (use reserve -> settle_grant). Kept for importing historical records."""
         with _BUDGET_LOCK:
             self.calls.append(rec)
             for m in self.chain()[1:]:
