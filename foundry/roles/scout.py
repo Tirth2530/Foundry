@@ -64,7 +64,7 @@ def catalog() -> list[dict]:
     return out
 
 
-def _llm_json(system: str, user: str, skills, meter, events, max_tokens=500):
+def _llm_json(system: str, user: str, skills, meter, events, max_tokens=2000):
     def go(p):
         r = llm.chat([{"role": "system", "content": system}, {"role": "user", "content": user}],
                      provider=p, role="scout", meter=meter, max_tokens=max_tokens)
@@ -132,7 +132,7 @@ def _claim_probe(c: dict, skills, meter, events) -> dict | None:
     if c["source"] != "agentverse_search" or len(c.get("readme", "")) < 40:
         return None
     try:
-        d = _llm_json(CLAIM_SYSTEM, c["readme"], skills, meter, events, max_tokens=400)
+        d = _llm_json(CLAIM_SYSTEM, c["readme"], skills, meter, events, max_tokens=2000)
     except llm.BudgetExceeded:
         raise
     except Exception:  # noqa: BLE001
@@ -164,7 +164,7 @@ def find(request: str, skills, meter, events=None, client=None) -> dict:
 
     listing = "\n".join(f"- id={c['id']} source={c['source']}: {c['description'][:450]}" for c in short)
     ranked = _llm_json(MATCH_SYSTEM, f"Request:\n{request}\n\nCandidates:\n{listing}", skills, meter, events,
-                       max_tokens=700).get("ranked", [])
+                       max_tokens=3000).get("ranked", [])
     by_id = {c["id"]: c for c in short}
     chosen = [(by_id[r["id"]], r) for r in ranked if r.get("id") in by_id
               and float(r.get("confidence") or 0) >= 0.6][:MAX_CANDIDATES]

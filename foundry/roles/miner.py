@@ -35,7 +35,7 @@ def mine(builds: list[dict], skills, meter, exclude_codes: set | None = None, ev
     def go(p):
         r = llm.chat([{"role": "system", "content": SYSTEM},
                       {"role": "user", "content": f"Cluster {code} ({n} failures across {len(specs)} tasks):\n{ex}"}],
-                     provider=p, role="miner", meter=meter, max_tokens=600)
+                     provider=p, role="miner", meter=meter, max_tokens=4000)
         return llm.extract_json(r["text"])
     cluster.update(recovery.call(go, provider=skills.route("miner"), events=events))
     return cluster

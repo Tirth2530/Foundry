@@ -40,7 +40,7 @@ def write_tests(request: str, skills, meter, events=None) -> dict:
 
     def go(p):
         r = llm.chat([{"role": "system", "content": SYSTEM}, {"role": "user", "content": request}],
-                     provider=p, role="examiner", meter=meter, max_tokens=3000)
+                     provider=p, role="examiner", meter=meter, max_tokens=8000)
         data = llm.extract_json(r["text"])
         raw = data.get("cases", []) if isinstance(data, dict) else data
         good, dropped = [], []

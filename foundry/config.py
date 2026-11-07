@@ -92,6 +92,6 @@ MIN_CHARGE_USD = float(env("FOUNDRY_MIN_CHARGE_USD", "0.50"))  # Stripe minimum
 MARGIN = float(env("FOUNDRY_MARGIN", "1.5"))  # price = estimated cost * margin
 
 # ---------------------------------------------------------------- build loop defaults
-DEFAULT_BUDGET_USD = float(env("FOUNDRY_BUDGET_USD", "1.50"))
+DEFAULT_BUDGET_USD = float(env("FOUNDRY_BUDGET_USD", "50"))
 TURN_TIMEOUT_S = float(env("FOUNDRY_TURN_TIMEOUT", "15"))
 PARALLEL_BUILDS = int(env("FOUNDRY_PARALLEL", "3"))

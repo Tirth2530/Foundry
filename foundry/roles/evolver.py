@@ -37,7 +37,7 @@ def propose(cluster: dict, skills, meter, history: list[dict], events=None) -> d
     msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": ctx}]
 
     def go(p):
-        r = llm.chat(msgs, provider=p, role="evolver", meter=meter, max_tokens=1500)
+        r = llm.chat(msgs, provider=p, role="evolver", meter=meter, max_tokens=8000)
         patch = llm.extract_json(r["text"])
         errs = sk.validate_patch(patch, skills)
         if errs:

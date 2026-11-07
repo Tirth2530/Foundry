@@ -25,7 +25,7 @@ def cases(request: str, skills, meter, events=None) -> list[dict]:
     try:
         def go(p):
             r = llm.chat([{"role": "system", "content": SYSTEM}, {"role": "user", "content": request}],
-                         provider=p, role="adversary", meter=meter, max_tokens=400)
+                         provider=p, role="adversary", meter=meter, max_tokens=3000)
             return llm.extract_json(r["text"]).get("messages", [])[:2]
         for i, m in enumerate(recovery.call(go, provider=skills.route("adversary"), attempts=1, events=events,
                                                 avoid=skills.route("builder"))):

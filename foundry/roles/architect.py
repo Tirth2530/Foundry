@@ -16,7 +16,7 @@ Use exactly as many agents as the request asks for (default 1)."""
 def plan(request: str, skills, meter, events=None) -> dict:
     def go(provider):
         r = llm.chat([{"role": "system", "content": SYSTEM}, {"role": "user", "content": request}],
-                     provider=provider, role="architect", meter=meter, max_tokens=1200)
+                     provider=provider, role="architect", meter=meter, max_tokens=4000)
         p = llm.extract_json(r["text"])
         if not isinstance(p, dict) or not p.get("agents"):
             raise ValueError("plan has no agents")

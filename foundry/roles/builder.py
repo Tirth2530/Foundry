@@ -24,7 +24,7 @@ def _messages(request, plan, skills):
 
 def build(request: str, plan: dict, skills, meter, events=None) -> dict:
     def go(provider):
-        r = llm.chat(_messages(request, plan, skills), provider=provider, role="builder", meter=meter, max_tokens=8000)
+        r = llm.chat(_messages(request, plan, skills), provider=provider, role="builder", meter=meter, max_tokens=16000)
         out = llm.extract_agents(r["text"])
         out["provider"] = r["provider"]
         return out
@@ -42,7 +42,7 @@ def repair(request: str, plan: dict, prev: dict, feedback: str, skills, meter, e
     ]
 
     def go(provider):
-        r = llm.chat(msgs, provider=provider, role="repair", meter=meter, max_tokens=8000)
+        r = llm.chat(msgs, provider=provider, role="repair", meter=meter, max_tokens=16000)
         out = llm.extract_agents(r["text"])
         out["provider"] = r["provider"]
         return out
