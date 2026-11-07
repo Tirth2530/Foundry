@@ -21,6 +21,8 @@ def readme(name: str, request: str, verify: dict, job_id: str, entry: bool) -> s
 
 
 def publish(job: dict, smoke_case: dict | None, client: agentverse.Client | None = None) -> dict:
+    if job.get("status") != "verified":
+        raise ValueError(f"refusing to publish {job.get('job_id')}: status is {job.get('status')}, not verified")
     client = client or agentverse.Client()
     build = json.loads((config.RUNS / job["job_id"] / "final" / "build.json").read_text())
     addrs = {a["name"]: client.create(f"{a['name']}-{job['job_id'][-6:]}") for a in build["agents"]}
@@ -36,10 +38,19 @@ def publish(job: dict, smoke_case: dict | None, client: agentverse.Client | None
         client.start(addrs[a["name"]])
     entry_addr = addrs[build["entry"]]
     live = livecheck.run(client, entry_addr, smoke_case)
+    released = bool(live.get("passed"))
+    if not released:
+        # RELEASE GATE: a deployment whose live behaviour wasn't confirmed is taken down again
+        for addr in addrs.values():
+            try:
+                client.stop(addr)
+            except agentverse.AgentverseError:
+                pass
     out = {"job_id": job["job_id"], "agents": addrs, "entry": entry_addr, "readme_set": profile,
+           "released": released, "rolled_back": not released,
            "profile_url": f"https://agentverse.ai/agents/details/{entry_addr}/profile", "live_invocation": live}
     (config.RUNS / job["job_id"] / "publish.json").write_text(json.dumps(out, indent=1))
-    ledger.append("publish", job_id=job["job_id"], agents=addrs, entry=entry_addr, request=job["request"][:600],
+    ledger.append("publish" if released else "publish_failed", job_id=job["job_id"], agents=addrs, entry=entry_addr, request=job["request"][:600],
                   verify=job.get("verify"),
                   live_passed=live.get("passed"), live_latency_s=live.get("latency_s"))
     return out

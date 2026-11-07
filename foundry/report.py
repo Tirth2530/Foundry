@@ -19,7 +19,8 @@ def write() -> str:
              f"- Patches proposed: {len(decisions)} · promoted {sum(d['decision'] == 'promoted' for d in decisions)}"
              f" · rejected and rolled back {sum(d['decision'] == 'rejected' for d in decisions)}",
              f"- Ledger: {n} hash-chained records, chain {'intact' if chain_ok else 'BROKEN'}",
-             f"- Final set opened {len(opened)} time(s); content hash {bench.split_hash('final')}", "",
+             f"- Final set opened {len(opened)} time(s), reopened {len(ledger.read('final_reopened'))} time(s); "
+             f"content hash {bench.split_hash('final')}", "",
              "## Evolution (sealed promotion set)", "",
              "| candidate | parent | patch | current solved | candidate solved | $/build | decision | reason |",
              "|---|---|---|---|---|---|---|---|"]

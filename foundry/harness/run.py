@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 from .. import config, dsl
 
@@ -21,11 +22,12 @@ def run(agents: list[dict], entry: str, cases: list[dict], *, turn_timeout: floa
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
         json.dump(job, f)
         path = f.name
-    env = {**os.environ, "PYTHONPATH": str(config.ROOT)}
+    mode = sandbox_mode()
     work = tempfile.mkdtemp(prefix="foundry_run_")  # agent storage files land here, not in the repo
     try:
-        p = subprocess.run([sys.executable, "-m", "foundry.harness.runner", path], cwd=work,
-                           capture_output=True, text=True, timeout=hard + 15, env=env)
+        p = subprocess.run(_command(mode, path, work, hard), cwd=work, capture_output=True, text=True,
+                           timeout=hard + 30, env=_clean_env(work),
+                           preexec_fn=_limits(hard) if mode == "process" and os.name == "posix" else None)
         out, err = p.stdout, p.stderr
     except subprocess.TimeoutExpired as e:
         out = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
@@ -40,7 +42,63 @@ def run(agents: list[dict], entry: str, cases: list[dict], *, turn_timeout: floa
     stderr_tail = _interesting(err)
     if raw is None:
         raw = {"load_errors": {"__harness__": "runner produced no result"}, "cases": []}
-    return {"raw": raw, "results": judge(cases, raw), "stderr_tail": stderr_tail}
+    return {"raw": raw, "results": judge(cases, raw), "stderr_tail": stderr_tail, "sandbox": mode}
+
+
+# ---------------------------------------------------------------- sandbox
+# docker  : no network, read-only root, tmpfs work dir, 768MB RAM, 1 CPU, 256 pids, all caps dropped,
+#           non-root user, nothing mounted except the runner and the job file (read-only).
+# process : fallback when Docker isn't available: separate process in isolated mode (-I: no user site,
+#           no PYTHONPATH, FOUNDRY not importable), EMPTY environment (no API keys), temp working dir,
+#           CPU/file-size/open-file limits. Weaker: it can still read files your user can read, which is
+#           why the Integrator also statically forbids files, env, eval/exec, os/sys/subprocess.
+RUNNER = Path(__file__).resolve().parent / "runner.py"
+IMAGE = config.env("FOUNDRY_SANDBOX_IMAGE", "foundry-sandbox:1")
+
+
+def sandbox_mode() -> str:
+    want = config.env("FOUNDRY_SANDBOX", "auto")
+    if want == "process":
+        return "process"
+    has_image = shutil.which("docker") and subprocess.run(
+        ["docker", "image", "inspect", IMAGE], capture_output=True).returncode == 0
+    if want == "docker" and not has_image:
+        raise RuntimeError(f"FOUNDRY_SANDBOX=docker but image {IMAGE} is missing: run `python -m foundry sandbox-build`")
+    return "docker" if has_image else "process"
+
+
+def _command(mode: str, job_path: str, work: str, hard: float) -> list[str]:
+    if mode == "docker":
+        return ["docker", "run", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp:rw,size=64m",
+                "--tmpfs", "/work:rw,size=64m,uid=10001", "-w", "/work", "-e", "HOME=/work", "--memory", "768m",
+                "--cpus", "1", "--pids-limit", "256", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+                "-v", f"{RUNNER}:/sandbox/runner.py:ro", "-v", f"{job_path}:/sandbox/job.json:ro",
+                IMAGE, "python", "-I", "/sandbox/runner.py", "/sandbox/job.json"]
+    return [sys.executable, "-I", str(RUNNER), job_path]
+
+
+def _clean_env(work: str) -> dict:
+    """No API keys, no tokens, nothing from your shell except what Python needs to start."""
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": work, "TMPDIR": work, "LANG": "C.UTF-8"}
+    for k in ("SYSTEMROOT", "DOCKER_HOST"):  # Windows python / remote docker need these
+        if os.environ.get(k):
+            env[k] = os.environ[k]
+    return env
+
+
+def _limits(hard: float):
+    def apply():
+        import resource
+        for lim, val in ((resource.RLIMIT_CPU, int(hard) + 30), (resource.RLIMIT_FSIZE, 64 * 2**20),
+                         (resource.RLIMIT_NOFILE, 1024), (getattr(resource, "RLIMIT_AS", None), 3 * 2**30)):
+            if lim is None:
+                continue
+            try:
+                resource.setrlimit(lim, (val, val))
+            except (ValueError, OSError):
+                pass  # e.g. macOS does not support RLIMIT_AS
+        os.setsid()
+    return apply
 
 
 def judge(cases: list[dict], raw: dict) -> list[dict]:

@@ -26,7 +26,10 @@ MAX_LESSON_CHARS = 1800
 PATCH_KINDS = {"lesson_add", "lesson_edit", "lesson_remove", "config"}
 CONFIG_KEYS = {"routing", "tools", "repair_budget"}
 ROLES = {"scout", "architect", "builder", "repair", "examiner", "adversary", "miner", "evolver", "foreman"}
-TOOLS = {"preflight_static", "run_examiner_tests", "selection_json_probe", "include_reply_text"}
+# Evolution may tune these. It may NOT switch off its own verifier: preflight_static and
+# run_examiner_tests are locked on, and the release gate re-checks everything anyway.
+TOOLS = {"selection_json_probe", "include_reply_text"}
+LOCKED_TOOLS = {"preflight_static": True, "run_examiner_tests": True}
 
 
 @dataclass
@@ -47,6 +50,8 @@ class Skillset:
         return self.config.get("routing", {}).get(role, "gpt")
 
     def tool(self, name: str) -> bool:
+        if name in LOCKED_TOOLS:
+            return LOCKED_TOOLS[name]
         return bool(self.config.get("tools", {}).get(name, False))
 
 
@@ -97,6 +102,8 @@ def validate_patch(patch: dict, base: Skillset) -> list[str]:
                 errs.append(f"config key {k!r} not editable")
             elif k == "routing" and (not isinstance(v, dict) or any(r not in ROLES or p not in ("gpt", "meta", "asi") for r, p in v.items())):
                 errs.append("routing must map roles to gpt|meta|asi")
+            elif k == "routing" and any(r in ("examiner", "adversary") for r in v):
+                errs.append("the verifier's model family is locked: evolution may not re-route examiner/adversary")
             elif k == "tools" and (not isinstance(v, dict) or any(t not in TOOLS for t in v)):
                 errs.append(f"tools must be a dict over {sorted(TOOLS)}")
             elif k == "repair_budget" and not (isinstance(v, int) and 0 <= v <= 4):

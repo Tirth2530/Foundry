@@ -132,6 +132,7 @@ def build(request: str, skills, *, budget_usd: float | None = None, job_id: str 
                 say("verify", {"attempt": attempt})
                 run = rpc("runner", "run", harness.run, agents=art["agents"], entry=art["entry"], cases=verify_cases)
                 verify_results = run["results"]
+                result["sandbox"] = run.get("sandbox")
                 audit = rpc("card_validator", "audit", card_validator.audit, raw=run["raw"])
                 summ = harness.summarize(verify_results)
                 rec.update(verify=summ, card_audit=audit, load_errors=run["raw"].get("load_errors"))
@@ -159,8 +160,22 @@ def build(request: str, skills, *, budget_usd: float | None = None, job_id: str 
             result["hidden"] = {**hs, "solved": hs["passed"] == hs["cases"],
                                 "failures": harness_failures(hid["results"])}
             _write(jd / "hidden.json", {"results": hid["results"], "stderr": hid["stderr_tail"]})
-        result["status"] = "verified" if result["verify"]["cases"] and \
-            result["verify"]["passed"] == result["verify"]["cases"] else "unverified"
+        # RELEASE GATE: every check, on the FINAL artifact, regardless of any tool setting
+        final_static = rpc("integrator", "check", integrator.check, build=art)
+        last = result["attempts"][-1] if result["attempts"] else {}
+        exam_names = {c.get("name") for c in exam["cases"]}
+        exam_passed = sum(1 for r in verify_results if r["name"] in exam_names and r["passed"])
+        gate = {
+            "independent_tests_ran": bool(exam["cases"]),
+            "all_tests_passed": bool(result["verify"]["cases"]) and result["verify"]["passed"] == result["verify"]["cases"],
+            "examiner_tests_passed": f"{exam_passed}/{len(exam['cases'])}",
+            "static_clean": not final_static,
+            "cards_clean": not last.get("card_audit") and not last.get("skipped_run"),
+            "no_load_errors": not last.get("load_errors"),
+        }
+        result["release_gate"] = {**gate, "static": final_static, "sandbox": result.get("sandbox")}
+        ok = all(v for k, v in gate.items() if k != "examiner_tests_passed") and exam_passed == len(exam["cases"])
+        result["status"] = "verified" if ok else "unverified"
     except llm.BudgetExceeded as e:
         result["status"] = "budget_exceeded"
         result["error"] = str(e)

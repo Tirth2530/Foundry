@@ -3,7 +3,7 @@
 Bureau, then drives each test case from its own fresh client agent over the real Agent Chat
 Protocol. It only RECORDS what happened; judging is done by the parent (foundry.dsl).
 
-Usage: python -m foundry.harness.runner job.json   ->  prints one line "FOUNDRY_RESULT:{json}"
+Usage: python -I foundry/harness/runner.py job.json   ->  prints one line "FOUNDRY_RESULT:{json}"
 Isolation: separate process, hard wall-clock limit, no endpoints (nothing is registered on
 the public Almanac during tests).
 """

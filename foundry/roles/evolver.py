@@ -16,7 +16,7 @@ Patch kinds (JSON only):
  {"kind":"lesson_edit","file":"<existing file>","content":"<full new content>"}
  {"kind":"lesson_remove","file":"<existing file>"}           (remove a lesson that is wrong or wasteful)
  {"kind":"config","config_changes":{"tools":{"selection_json_probe":true}}}
-     tools: preflight_static, run_examiner_tests, selection_json_probe, include_reply_text
+     tools: selection_json_probe, include_reply_text  (the static gate and independent tests are locked on)
      also: {"repair_budget": 0-4} or {"routing": {"<role>": "gpt|meta|asi"}}
 Add "rationale" and "targets" (the failure code) to the JSON.
 Rules: lessons must generalize; never mention task names, test inputs or expected outputs; prefer exact API

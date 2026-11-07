@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from . import bench, config, ledger, llm, pipeline, skills as sk
@@ -138,16 +139,40 @@ def _lessons_only_arm(base, cur):
     return sk.load(f"{cur.version}-lessons-only", dest)
 
 
-def evaluate_final(repeats: int = 2, say=print) -> dict:
+FINAL_LOCK = "final.lock"
+
+
+def evaluate_final(repeats: int = 2, say=print, reopen_reason: str | None = None) -> dict:
     """Run ONCE, at the end, on the untouched final set. Same budget cap for every arm.
       baseline       v0000: what an ordinary coding agent gets
       evolved        current version as promoted
       lessons-only   baseline models/tools/budget + learned lessons (controls for routing/budget)"""
+    lock = config.EVIDENCE / FINAL_LOCK
+    if lock.exists():
+        if not reopen_reason:
+            raise PermissionError(f"the final set was already used ({lock.read_text().strip()}). Results from a "
+                                  "second look are no longer held-out; pass --reopen \"<reason>\" to do it anyway, "
+                                  "which is recorded in the ledger and the report")
+        ledger.append("final_reopened", reason=reopen_reason, previous=lock.read_text().strip())
     base = sk.load(sk.BASELINE)
     cur = sk.load()
     arms = [base] if cur.version == base.version else [base, cur]
     if cur.version != base.version and cur.config != base.config:
         arms.append(_lessons_only_arm(base, cur))
+    out = {}
+    bench._FINAL_UNLOCKED = True
+    try:
+        out = _run_final_arms(arms, repeats, say)
+    finally:
+        bench._FINAL_UNLOCKED = False
+    config.EVIDENCE.mkdir(parents=True, exist_ok=True)
+    lock.write_text(f"used {time.strftime('%Y-%m-%d %H:%M:%S')} hash {bench.split_hash('final')}\n")
+    ledger.append("final_eval", results=out, final_hash=bench.split_hash("final"), reopened=bool(reopen_reason))
+    (config.EVIDENCE / "final_eval.json").write_text(json.dumps(out, indent=1))
+    return out
+
+
+def _run_final_arms(arms, repeats, say) -> dict:
     out = {}
     for s in arms:
         say(f"final eval: {s.version} x{repeats} (budget cap ${config.DEFAULT_BUDGET_USD}/build) ...")
@@ -155,8 +180,6 @@ def evaluate_final(repeats: int = 2, say=print) -> dict:
         out[s.version] = {**judge.public(agg), "routing": s.config.get("routing"),
                           "repair_budget": s.config.get("repair_budget"), "lessons": len(s.lessons)}
         say(json.dumps(out[s.version]))
-    ledger.append("final_eval", results=out, final_hash=bench.split_hash("final"))
-    (config.EVIDENCE / "final_eval.json").write_text(json.dumps(out, indent=1))
     return out
 
 

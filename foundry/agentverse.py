@@ -100,7 +100,14 @@ class Client:
             return r.text
 
     def create(self, name: str) -> str:
-        data = self._req("POST", "/v1/hosting/agents", json={"name": name[:60]})
+        try:
+            data = self._req("POST", "/v1/hosting/agents", json={"name": name[:60]})
+        except AgentverseError as e:
+            if not any(f"HTTP {c}" in str(e) for c in (404, 405, 410)):
+                raise
+            data = self._req("POST", "/v2/hosting")  # newer API: created without profile; name set via update
+            if isinstance(data, dict) and data.get("address"):
+                self.update_profile(data["address"], name, "", name)
         addr = data.get("address") if isinstance(data, dict) else None
         if not addr:
             raise AgentverseError(f"no address in create response: {data}")
@@ -119,7 +126,12 @@ class Client:
             return False
 
     def start(self, addr: str) -> None:
-        self._req("POST", f"/v1/hosting/agents/{addr}/start")
+        try:
+            self._req("POST", f"/v1/hosting/agents/{addr}/start")
+        except AgentverseError as e:
+            if not any(f"HTTP {c}" in str(e) for c in (404, 405, 410)):
+                raise
+            self._req("POST", f"/v2/hosting/{addr}/start")
 
     def stop(self, addr: str) -> None:
         self._req("POST", f"/v1/hosting/agents/{addr}/stop")

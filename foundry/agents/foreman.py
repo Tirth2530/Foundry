@@ -30,6 +30,8 @@ from ..roles import publisher, quartermaster, scout
 from . import payments
 
 JOB_RE = re.compile(r"job_[0-9a-f]{6}")
+ADMINS = {a.strip() for a in (config.env("FOUNDRY_ADMINS", "") or "").split(",") if a.strip()}
+LEARN_PER_DAY = int(config.env("FOUNDRY_LEARN_PER_DAY", "3"))
 
 
 def _now():
@@ -99,6 +101,14 @@ class Foreman:
         agent.include(chat_proto, publish_manifest=True)
         agent.include(pay_proto, publish_manifest=True)
 
+    def _allow_learn(self, sender: str) -> bool:
+        day = time.strftime("%Y-%m-%d")
+        n = sum(1 for r in ledger.read("learn_requested") if r.get("sender") == sender and r["t"].startswith(day))
+        if n >= LEARN_PER_DAY:
+            return False
+        ledger.append("learn_requested", sender=sender)
+        return True
+
     # ------------------------------------------------------------ persistence
     def _load_jobs(self):
         for p in config.RUNS.glob("job_*/job.json"):
@@ -133,9 +143,24 @@ class Foreman:
             req = str(sel.get("request", "")).strip()
             budget = sel.get("budget")
             return await self.quote(ctx, sender, req, budget)
-        if action in ("approve_quote", "reject_quote", "publish", "evidence", "reuse", "build_new", "learn") \
-                and jid not in self.jobs:
+        job_actions = ("approve_quote", "reject_quote", "publish", "evidence", "reuse", "build_new", "learn")
+        if action in job_actions and jid not in self.jobs:
             return await ctx.send(sender, chat(f"I couldn't find job {jid}. Say 'status' to see your jobs."))
+        # AUTHORIZATION: a job can only be approved, paid, published, inspected or learned from by the
+        # address that requested it. Changing FOUNDRY globally (evolve, rollback) needs an admin address.
+        if action in job_actions and self.jobs[jid].get("sender") != sender:
+            ledger.append("auth_denied", action=action, job_id=jid, sender=sender)
+            return await ctx.send(sender, chat(f"{jid} belongs to another user, so I can't do that for you."))
+        if action in ("evolve", "rollback") and sender not in ADMINS:
+            ledger.append("auth_denied", action=action, sender=sender)
+            return await ctx.send(sender, chat(
+                "Changing FOUNDRY's skills globally is admin-only. Ask an operator, or say 'whoami' and add your "
+                "address to FOUNDRY_ADMINS. You can still teach FOUNDRY from your own builds."))
+        if action == "learn" and not self._allow_learn(sender):
+            return await ctx.send(sender, chat("You've hit today's limit of learning runs. Each one runs the sealed "
+                                               "promotion set, so it's rate-limited."))
+        if action == "whoami":
+            return await ctx.send(sender, chat(f"Your address: {sender} (admin: {'yes' if sender in ADMINS else 'no'})"))
         handlers = {
             "approve_quote": lambda: self.approve(ctx, sender, self.jobs[jid]),
             "reuse": lambda: self.reuse(ctx, sender, self.jobs[jid], (sel or {}).get("pick")),
@@ -188,6 +213,8 @@ class Foreman:
             return "rollback", m.group(1)
         if any(w in low for w in ("scoreboard", "results", "baseline", "how much better", "prove you improved")):
             return "scoreboard", None
+        if low in ("whoami", "who am i"):
+            return "whoami", None
         if low in ("status", "my jobs", "jobs") or low.startswith("status"):
             return "status", None
         if any(w in low for w in ("evolution", "history", "versions", "changelog", "what have you learned")):
@@ -503,6 +530,13 @@ class Foreman:
             self._update(job, status="verified")
             return self.later(sender, chat(f"Publishing failed: {e}. The verified build is unchanged; try again."))
         live = out["live_invocation"]
+        if not out.get("released"):
+            self._update(job, status="verified", last_publish_attempt=out)
+            bad = next((c for c in live.get("checks", []) if not c["ok"]), {})
+            return self.later(sender, chat(
+                f"Release BLOCKED for {job['job_id']}: the deployed agent didn't pass its live check "
+                f"({bad.get('code', 'no reply')}: {str(bad.get('detail', ''))[:160]}). I stopped the deployment, so "
+                "nothing unverified is live. The sandbox-verified build is unchanged, so you can retry publishing."))
         self._update(job, status="verified", published=out)
         live_txt = ("skipped" if live.get("skipped") else
                     f"{'PASS' if live.get('passed') else 'FAIL'} in {live.get('latency_s', '?')}s · "

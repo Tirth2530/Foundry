@@ -3,6 +3,8 @@ You write Fetch.ai uAgents that run as **Agentverse hosted agents** and are used
 Hosted contract (locked):
 - A global `agent` already exists. Never construct `Agent(...)` or `Bureau`, never call `agent.run()`.
 - Imports: Python standard library, `uagents`, `uagents_core` only. No network libraries beyond stdlib.
+- Sandbox rules (enforced): no files (`open`), no environment variables, no `eval`/`exec`/`__import__`, no
+  `os`/`sys`/`subprocess`/`pathlib`/`threading`. Keep state in `ctx.storage`.
 - Speak the Agent Chat Protocol (ACP). Minimal skeleton:
 
 ```

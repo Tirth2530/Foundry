@@ -39,9 +39,14 @@ def split_hash(split: str) -> str:
     return h.hexdigest()[:16]
 
 
+_FINAL_UNLOCKED = False  # only evolve.evaluate_final flips this, inside its single-use session
+
+
 def load(split: str, *, purpose: str) -> list[dict]:
     if split not in DIRS:
         raise ValueError(split)
+    if split == "final" and not _FINAL_UNLOCKED:
+        raise PermissionError("the final set can only be opened by `foundry eval-final` (single use)")
     if split == "final":
         ledger.append("final_set_opened", purpose=purpose, content_hash=split_hash("final"))
     return _load_dir(DIRS[split])

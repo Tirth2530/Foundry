@@ -7,6 +7,7 @@
   serve [--direct]           run the agent network (Foreman on ASI:One + 14 role agents)
   evolve --rounds N          Gate 3: self-improvement rounds (dev -> patch -> sealed promotion gate)
   eval-final [--repeats 2]   baseline v0000 vs current on the untouched final set (run once, at the end)
+  sandbox-build              build the Docker sandbox (no network, no keys, resource-limited) for generated code
   learn job_xxxxxx           live self-improvement from ONE build's caught defects (sealed gate decides)
   history                    every patch FOUNDRY proposed, and what the gate decided
   rollback vNNNN             point CURRENT back to an earlier skill version
@@ -148,7 +149,15 @@ def cmd_evolve(a):
 
 def cmd_eval_final(a):
     from . import evolve
-    print(json.dumps(evolve.evaluate_final(a.repeats), indent=1))
+    print(json.dumps(evolve.evaluate_final(a.repeats, reopen_reason=a.reopen), indent=1))
+
+
+def cmd_sandbox_build(_):
+    import subprocess
+    from . import config
+    from .harness import run as h
+    r = subprocess.run(["docker", "build", "-t", h.IMAGE, str(config.ROOT / "sandbox")])
+    print(f"sandbox image {h.IMAGE}: {'ready' if r.returncode == 0 else 'FAILED'} (mode now: {h.sandbox_mode()})")
 
 
 def cmd_learn(a):
@@ -256,7 +265,9 @@ def main():
     e.add_argument("--repeats", type=int, default=1)
     f = sub.add_parser("eval-final")
     f.add_argument("--repeats", type=int, default=2)
+    f.add_argument("--reopen", default=None, help="reason for reusing an already-used final set (logged)")
     sub.add_parser("history")
+    sub.add_parser("sandbox-build")
     le = sub.add_parser("learn")
     le.add_argument("job")
     r = sub.add_parser("rollback")
@@ -272,7 +283,7 @@ def main():
     a = ap.parse_args()
     {"doctor": cmd_doctor, "gate1": cmd_gate1, "selftest": cmd_selftest, "build": cmd_build, "serve": cmd_serve,
      "evolve": cmd_evolve, "eval-final": cmd_eval_final, "history": cmd_history, "rollback": cmd_rollback,
-     "claim": cmd_claim, "learn": cmd_learn, "report": cmd_report, "lint": cmd_lint, "search": cmd_search,
+     "claim": cmd_claim, "learn": cmd_learn, "sandbox-build": cmd_sandbox_build, "report": cmd_report, "lint": cmd_lint, "search": cmd_search,
      "scout": cmd_scout}[a.cmd](a)
 
 
