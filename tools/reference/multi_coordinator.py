@@ -15,14 +15,13 @@ class Ans(Model):
 
 
 protocol = Protocol(spec=chat_protocol_spec)
-waiting = []
 
 
 @protocol.on_message(ChatMessage)
 async def on_chat(ctx: Context, sender: str, msg: ChatMessage):
     await ctx.send(sender, ChatAcknowledgement(timestamp=datetime.now(timezone.utc), acknowledged_msg_id=msg.msg_id))
     text = " ".join(c.text for c in msg.content if isinstance(c, TextContent)).strip()
-    waiting.append(sender)
+    ctx.storage.set("waiting", (ctx.storage.get("waiting") or []) + [sender])
     await ctx.send(PEERS["upper"], Ask(text=text))
 
 
@@ -33,8 +32,10 @@ async def on_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
 
 @agent.on_message(Ans)
 async def on_ans(ctx: Context, sender: str, msg: Ans):
+    waiting = ctx.storage.get("waiting") or []
     if waiting:
-        user = waiting.pop(0)
+        user = waiting[0]
+        ctx.storage.set("waiting", waiting[1:])
         await ctx.send(user, ChatMessage(timestamp=datetime.now(timezone.utc), msg_id=uuid4(),
                                          content=[TextContent(type="text", text="UPPER: " + msg.text)]))
 

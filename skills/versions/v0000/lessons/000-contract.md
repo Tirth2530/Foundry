@@ -34,7 +34,8 @@ async def on_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
 agent.include(protocol, publish_manifest=True)
 ```
 
-- Per-user state: `ctx.storage.get(key)` / `ctx.storage.set(key, value)` (JSON-serialisable values). Key by `sender`.
+- State: hosted agents do NOT keep module-level variables between messages. Keep ALL mutable state in
+  `ctx.storage.get(key)` / `ctx.storage.set(key, value)` (JSON-serialisable), keyed by `sender` for per-user state.
 - Multi-agent systems: a global dict `PEERS` maps agent name -> address. Message peers with `ctx.send(PEERS["name"], ...)`.
   Never hardcode addresses. Only the entry agent talks to the user.
 - Interactive cards: attach one `MetadataContent(type="metadata", metadata={...})` to the reply's content with keys

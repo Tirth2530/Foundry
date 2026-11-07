@@ -52,9 +52,9 @@ PROVIDERS = {
                                 "low" if env("OPENAI_MODEL", "gpt-5").startswith(("gpt-5", "o")) else "") or None,
     },
     "meta": {
-        "base_url": env("LLAMA_BASE_URL", "https://api.llama.com/compat/v1"),
+        "base_url": env("LLAMA_BASE_URL", "https://api.meta.ai/v1"),
         "api_key": env("LLAMA_API_KEY"),
-        "model": env("LLAMA_MODEL", "Llama-4-Maverick-17B-128E-Instruct-FP8"),
+        "model": env("LLAMA_MODEL", "muse-spark-1.1"),
         "price_in": float(env("LLAMA_PRICE_IN", "0.27")),
         "price_out": float(env("LLAMA_PRICE_OUT", "0.85")),
         "supports_temperature": True,

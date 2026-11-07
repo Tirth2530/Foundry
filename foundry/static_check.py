@@ -57,8 +57,46 @@ def check(code: str, entry: bool = True) -> list[str]:
             errs.append(f"use of .{node.attr} is not allowed in hosted agents (no environment, files or processes)")
         if isinstance(node, ast.Name) and node.id in ("__builtins__", "__loader__", "__spec__"):
             errs.append(f"access to {node.id} is not allowed")
+    errs += _module_state(tree)
     if "agent.include(" not in code and "@agent.on_message" not in code:
         errs.append("protocol never registered: call agent.include(protocol, publish_manifest=True)")
     if entry and "ChatAcknowledgement" not in code:
         errs.append("no ChatAcknowledgement handling: ACP requires acknowledging every ChatMessage")
     return errs
+
+
+MUTATORS = {"append", "extend", "insert", "pop", "popleft", "update", "setdefault", "add", "remove", "clear",
+            "discard", "sort", "reverse"}
+
+
+def _module_state(tree) -> list[str]:
+    """Agentverse hosted agents lose module globals between messages, so state kept there works in a local
+    test and silently breaks once deployed. Flag `global` and mutation of module-level containers."""
+    mutables = set()
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            val = node.value
+            is_mut = isinstance(val, (ast.List, ast.Dict, ast.Set)) or (
+                isinstance(val, ast.Call) and isinstance(val.func, ast.Name) and val.func.id in
+                ("list", "dict", "set", "defaultdict", "deque", "OrderedDict", "Counter"))
+            for t in targets:
+                if is_mut and isinstance(t, ast.Name) and t.id != "PEERS":
+                    mutables.add(t.id)
+    errs = set()
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Global):
+                errs.add(f"`global {', '.join(n.names)}` in a handler: hosted agents lose globals between "
+                         "messages; keep state in ctx.storage")
+            elif isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in MUTATORS \
+                    and isinstance(n.func.value, ast.Name) and n.func.value.id in mutables:
+                errs.add(f"module-level '{n.func.value.id}' is mutated in a handler: hosted agents lose it between "
+                         "messages; keep state in ctx.storage")
+            elif isinstance(n, (ast.Subscript,)) and isinstance(n.ctx, (ast.Store, ast.Del)) \
+                    and isinstance(n.value, ast.Name) and n.value.id in mutables:
+                errs.add(f"module-level '{n.value.id}' is modified in a handler: hosted agents lose it between "
+                         "messages; keep state in ctx.storage")
+    return sorted(errs)

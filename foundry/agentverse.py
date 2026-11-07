@@ -10,7 +10,7 @@ import requests
 from . import config
 
 RELAY_CODE = '''
-import asyncio
+import time
 from datetime import datetime, timezone
 from uuid import uuid4
 from uagents import Context, Protocol
@@ -18,79 +18,100 @@ from uagents_core.contrib.protocols.chat import (
     ChatAcknowledgement, ChatMessage, TextContent, chat_protocol_spec,
 )
 
-PROBES = __PROBES__          # [{"i": int, "target": address, "send": text}]
-GAP_S = 4                    # wait between probes to the same agent so multi-message replies stay attributed
-queues, current, scheduled = {}, {}, set()
-for p in PROBES:
-    queues.setdefault(p["target"], []).append(p)
+# Agentverse hosted agents do NOT keep Python globals between messages: ALL state lives in ctx.storage.
+PROBES = __PROBES__          # [{"i": int, "target": address, "send": text}]  (constant, safe as a global)
+GAP_S = 4                    # gap between probes to the same agent so multi-part replies stay attributed
 protocol = Protocol(spec=chat_protocol_spec)
 
 
-async def send_next(ctx, target):
-    q = queues.get(target) or []
-    if not q:
-        return
-    p = q.pop(0)
-    current[target] = p["i"]
-    ctx.logger.info(f"FOUNDRY_RELAY_SEND {p['i']}")
+def load(ctx):
+    s = ctx.storage.get("relay_state")
+    if not s:
+        q = {}
+        for p in PROBES:
+            q.setdefault(p["target"], []).append(p["i"])
+        s = {"queues": q, "current": {}, "answered": {}, "sends": {}}
+    return s
+
+
+def save(ctx, s):
+    ctx.storage.set("relay_state", s)
+
+
+def probe_index(s, sender):
+    i = s["current"].get(sender)
+    if i is None:
+        own = [p["i"] for p in PROBES if p["target"] == sender]
+        i = own[0] if own else None
+    return i
+
+
+async def send(ctx, target, i):
+    text = next(p["send"] for p in PROBES if p["i"] == i)
+    ctx.logger.info(f"FOUNDRY_RELAY_SEND {i}")
     await ctx.send(target, ChatMessage(timestamp=datetime.now(timezone.utc), msg_id=uuid4(),
-                                       content=[TextContent(type="text", text=p["send"])]))
+                                       content=[TextContent(type="text", text=text)]))
 
 
-async def later(ctx, target):
-    await asyncio.sleep(GAP_S)
-    scheduled.discard(target)
-    await send_next(ctx, target)
-
-
-answered, sends = set(), {}
-
-
-@agent.on_interval(period=20.0)
-async def resend(ctx: Context):
-    # a freshly started agent may not be resolvable yet: resend the current probe until it answers
-    for target, i in list(current.items()):
-        if (target, i) in answered:
-            continue
-        n = sends.get((target, i), 1)
-        if n >= 9:
-            continue
-        sends[(target, i)] = n + 1
-        p = next(x for x in PROBES if x["i"] == i)
-        ctx.logger.info(f"FOUNDRY_RELAY_RESEND {i} attempt {n + 1}")
-        await ctx.send(target, ChatMessage(timestamp=datetime.now(timezone.utc), msg_id=uuid4(),
-                                           content=[TextContent(type="text", text=p["send"])]))
+async def start_next(ctx, s, target):
+    if s["queues"].get(target):
+        i = s["queues"][target].pop(0)
+        s["current"][target] = i
+        s["sends"][f"{target}|{i}"] = 1
+        save(ctx, s)
+        await send(ctx, target, i)
 
 
 @agent.on_event("startup")
 async def go(ctx: Context):
-    for target in list(queues):
-        await send_next(ctx, target)
+    s = load(ctx)
+    for target in list(s["queues"]):
+        if target not in s["current"]:
+            await start_next(ctx, s, target)
+    save(ctx, s)
+
+
+@agent.on_interval(period=12.0)
+async def tick(ctx: Context):
+    s = load(ctx)
+    now = time.time()
+    for target, i in list(s["current"].items()):
+        key = f"{target}|{i}"
+        if key in s["answered"]:
+            if now - s["answered"][key] >= GAP_S:
+                await start_next(ctx, s, target)
+            continue
+        n = s["sends"].get(key, 1)
+        if n < 12:  # a brand-new agent may not be routable yet: keep resending until it answers
+            s["sends"][key] = n + 1
+            save(ctx, s)
+            ctx.logger.info(f"FOUNDRY_RELAY_RESEND {i} attempt {n + 1}")
+            await send(ctx, target, i)
 
 
 @protocol.on_message(ChatMessage)
 async def on_chat(ctx: Context, sender: str, msg: ChatMessage):
     await ctx.send(sender, ChatAcknowledgement(timestamp=datetime.now(timezone.utc), acknowledged_msg_id=msg.msg_id))
-    i = current.get(sender)
+    s = load(ctx)
+    i = probe_index(s, sender)
     if i is None:
         return
-    answered.add((sender, i))  # multi-part replies (text, then a card) are all recorded; resends stop
     for c in msg.content:
         t = getattr(c, "type", "")
         if t == "text":
             ctx.logger.info(f"FOUNDRY_RELAY_TEXT {i} " + c.text.replace("\\n", " ")[:1500])
         elif t == "metadata":
             ctx.logger.info(f"FOUNDRY_RELAY_CARD {i} " + str(dict(c.metadata).get("card_kind")))
-    if queues.get(sender) and sender not in scheduled:
-        scheduled.add(sender)
-        asyncio.ensure_future(later(ctx, sender))
+    s["answered"].setdefault(f"{sender}|{i}", time.time())
+    save(ctx, s)
 
 
 @protocol.on_message(ChatAcknowledgement)
 async def on_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
-    if sender in current:
-        ctx.logger.info(f"FOUNDRY_RELAY_ACK {current[sender]}")
-        answered.add((sender, "ack"))
+    s = load(ctx)
+    i = probe_index(s, sender)
+    if i is not None:
+        ctx.logger.info(f"FOUNDRY_RELAY_ACK {i}")
 
 
 agent.include(protocol, publish_manifest=True)
@@ -316,8 +337,11 @@ class Client:
 
 
 def _lines(logs: str) -> list[str]:
+    """Log lines OLDEST first (the API returns newest first)."""
     try:
         entries = json.loads(logs)
+        if entries and isinstance(entries[0], dict) and "log_timestamp" in entries[0]:
+            entries = sorted(entries, key=lambda e: e.get("log_timestamp", ""))
         return [e.get("log_entry", "") if isinstance(e, dict) else str(e) for e in entries]
     except (ValueError, TypeError):
         return logs.splitlines()
