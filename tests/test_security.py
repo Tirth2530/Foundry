@@ -128,7 +128,11 @@ def test_other_users_cannot_act_on_my_job(sandbox, monkeypatch):
     from uagents import Agent
     from uagents_core.contrib.protocols.chat import ChatMessage, TextContent
     from foundry.agents import foreman as fm
-    from tests.test_foreman import Ctx, _cards, _texts
+    from tests.test_foreman import Ctx, _cards, _confirm, _texts
+
+    def _confirm_from(ctx, i):
+        c = [x for x in _cards(ctx.sent) if x["card_kind"] == "review"][-1]
+        return json.dumps(json.loads(c["card_payload"])["approve_cta"]["selection"])
     monkeypatch.setattr(config, "AGENTVERSE_API_KEY", None)
     agent = Agent(name="foundry", seed="auth")
     f = fm.Foreman(agent)
@@ -143,6 +147,9 @@ def test_other_users_cannot_act_on_my_job(sandbox, monkeypatch):
             await on_chat(ctx, who, ChatMessage(timestamp=datetime.now(timezone.utc), msg_id=uuid4(),
                                                 content=[TextContent(type="text", text=text)]))
         await say("alice", "Build an agent that reverses any text it gets, please")
+        await say("mallory", _confirm(ctx))                      # someone else's plan can't be confirmed
+        assert "belongs to another user" in _texts(ctx.sent[-1:])
+        await say("alice", _confirm_from(ctx, -2))
         jid = json.loads(_cards(ctx.sent)[-1]["card_payload"])["approve_cta"]["selection"]["job_id"]
         for action in ("approve_quote", "publish", "evidence", "learn"):
             await say("mallory", json.dumps({"action": action, "job_id": jid}))
@@ -152,7 +159,7 @@ def test_other_users_cannot_act_on_my_job(sandbox, monkeypatch):
         assert "admin-only" in _texts(ctx.sent[-1:])
         await say("mallory", json.dumps({"action": "rollback", "version": "v0000"}))
         assert "admin-only" in _texts(ctx.sent[-1:])
-        assert len(ledger.read("auth_denied")) == 6
+        assert len(ledger.read("auth_denied")) == 7
     asyncio.run(scenario())
 
 

@@ -32,6 +32,15 @@ def _cards(msgs):
     return out
 
 
+def _confirm(ctx) -> str:
+    """Free text never starts work: it yields a BUILD PLAN card. This taps its confirm button."""
+    plan = _cards(ctx.sent)[-1]
+    assert plan["card_kind"] == "review" and "Build plan" in plan["card_payload"], plan
+    sel = json.loads(plan["card_payload"])["approve_cta"]["selection"]
+    assert sel["action"] == "confirm_plan"
+    return json.dumps(sel)
+
+
 def _texts(msgs):
     return " ".join(c.text for _, m in msgs for c in getattr(m, "content", []) if getattr(c, "type", "") == "text")
 
@@ -53,7 +62,7 @@ def test_conversation(sandbox, monkeypatch):
 
         await say("hi")
         md = _cards(ctx.sent)[-1]
-        assert md["card_kind"] == "form" and cards.validate(md) == []
+        assert md["card_kind"] == "carousel" and cards.validate(md) == []   # starters, not a form
 
         await say(json.dumps({"action": "submit_request", "request": "Build an agent that reverses any text it gets",
                               "budget": "1.0"}))
@@ -145,6 +154,8 @@ def test_conversation_reuse_path(sandbox, monkeypatch):
             await on_chat(ctx, "user2", ChatMessage(timestamp=datetime.now(timezone.utc), msg_id=uuid4(),
                                                     content=[TextContent(type="text", text=text)]))
         await say("Build an ISBN-13 checker agent that replies VALID or INVALID")
+        assert "Scout" not in _texts(ctx.sent)                       # nothing searched before the user confirms
+        await say(_confirm(ctx))
         assert "Scout" in _texts(ctx.sent)
         for _ in range(100):
             await asyncio.sleep(0.05)

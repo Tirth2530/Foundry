@@ -7,11 +7,11 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from foundry import cards, config, evolve, ledger, pipeline, skills as sk
-from tests.test_foreman import Ctx, _cards, _texts
+from tests.test_foreman import Ctx, _cards, _confirm, _texts
 
 HANDLED = {"approve_quote", "reject_quote", "publish", "evidence", "reuse", "build_new", "learn", "recheck", "cancel",
            "passport", "permissions", "reject_publication", "compare", "scoreboard", "status", "history", "evolve",
-           "rollback", "welcome", "submit_request"}
+           "rollback", "welcome", "submit_request", "confirm_plan", "say"}
 
 
 def _selections(md):
@@ -47,6 +47,7 @@ def test_cards_a_and_b_drive_real_actions(sandbox, monkeypatch):
             await on_chat(ctx, "alice", ChatMessage(timestamp=datetime.now(timezone.utc), msg_id=uuid4(),
                                                     content=[TextContent(type="text", text=text)]))
         await say("Build an agent that reverses any text it gets, please")
+        await say(_confirm(ctx))
         a = _cards(ctx.sent)[-1]
         rows = {r["label"]: r["value"] for r in json.loads(a["card_payload"])["summary_rows"]}
         assert {"You want", "Existing agents", "Recommendation", "Estimated build cost", "Spending limit",

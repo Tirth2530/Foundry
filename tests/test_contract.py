@@ -11,7 +11,7 @@ from uuid import uuid4
 import pytest
 
 from foundry import bench, config, contract, ledger, llm, passport, pipeline, skills as sk
-from tests.test_foreman import Ctx, _cards, _texts
+from tests.test_foreman import Ctx, _cards, _confirm, _texts
 
 THREE = ("Build THREE agents. 'verifier' checks a claim of the form '<a>+<b>=<c>' and answers CONFIRMED or REJECTED. "
          "'publisher' posts approved findings. 'investigator' is the entry agent: it asks verifier and replies.")
@@ -162,6 +162,7 @@ def test_contract_changed_after_approval_is_refused(sandbox, monkeypatch):
         for h in agent.events["startup"]:
             await h(ctx)
         await say("alice", THREE)
+        await say("alice", _confirm(ctx))
         jid = json.loads(_cards(ctx.sent)[-1]["card_payload"])["approve_cta"]["selection"]["job_id"]
         real_start = f.start_build
 

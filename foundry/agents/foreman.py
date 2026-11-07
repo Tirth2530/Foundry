@@ -10,6 +10,7 @@ Conversation:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import threading
@@ -27,9 +28,14 @@ from uagents_core.contrib.protocols.payment import (
 
 from .. import cards, config, contract as contract_mod, jobs as jobs_mod, ledger, llm, pipeline, skills as sk
 from ..roles import livecheck, publisher, quartermaster, scout
-from . import payments
+from . import concierge, payments
 
 JOB_RE = re.compile(r"job_[0-9a-f]{6}")
+PLAN_RE = re.compile(r"plan_[0-9a-f]{6}")
+
+
+def _convos_dir():
+    return config.RUNS / "_conversations"
 ADMINS = {a.strip() for a in (config.env("FOUNDRY_ADMINS", "") or "").split(",") if a.strip()}
 LEARN_PER_DAY = int(config.env("FOUNDRY_LEARN_PER_DAY", "3"))
 
@@ -76,6 +82,8 @@ class Foreman:
         self.ctx = None
         self.evolving = threading.Lock()
         self.cancels: dict = {}  # job_id -> threading.Event checked before every paid stage / model call
+        self.convos: dict = {}   # sender -> [{"role","content"}]: the conversation the concierge reasons over
+        self.plans: dict = {}    # plan_id -> {"sender", "plan"}: drafted with the user, built only on confirm
         self._load_jobs()
 
         chat_proto = Protocol(spec=chat_protocol_spec)
@@ -98,8 +106,9 @@ class Foreman:
             text = clean(text)
             started = any(isinstance(c, StartSessionContent) for c in msg.content)
             ctx.logger.info(f"chat from {sender[:14]}...: {text[:240]!r}")
+            self.remember(sender, "user", _describe_user_turn(text))
             try:
-                await self.route(ctx, sender, text, started)
+                await self.route(_Recorder(ctx, self), sender, text, started)
             except Exception as e:  # noqa: BLE001 - never leave the user without a reply
                 ctx.logger.exception("route failed")
                 await ctx.send(sender, chat(f"Something failed on my side ({type(e).__name__}: {e}). "
@@ -157,7 +166,42 @@ class Foreman:
 
     def later(self, to: str, msg: ChatMessage):
         """Send from a worker thread into the agent's event loop."""
+        self.remember_out(to, msg)
         asyncio.run_coroutine_threadsafe(self.ctx.send(to, msg), self.loop)
+
+    # ------------------------------------------------------------ conversation memory
+    def history_of(self, sender: str) -> list[dict]:
+        if sender not in self.convos:
+            f = _convos_dir() / f"{hashlib.sha256(sender.encode()).hexdigest()[:16]}.json"
+            try:
+                self.convos[sender] = json.loads(f.read_text()) if f.exists() else []
+            except ValueError:
+                self.convos[sender] = []
+        return self.convos[sender]
+
+    def remember(self, sender: str, role: str, content: str):
+        if not content:
+            return
+        h = self.history_of(sender)
+        if h and h[-1]["role"] == role:  # merge consecutive messages from the same side
+            h[-1]["content"] = (h[-1]["content"] + "\n" + content)[-4000:]
+        else:
+            h.append({"role": role, "content": content[-4000:]})
+        del h[:-2 * concierge.HISTORY_TURNS]
+        try:
+            _convos_dir().mkdir(parents=True, exist_ok=True)
+            (_convos_dir() / f"{hashlib.sha256(sender.encode()).hexdigest()[:16]}.json").write_text(json.dumps(h))
+        except OSError:
+            pass
+
+    def remember_out(self, to: str, msg):
+        parts = []
+        for c in getattr(msg, "content", []) or []:
+            if getattr(c, "type", "") == "text":
+                parts.append(c.text)
+            elif getattr(c, "type", "") == "metadata":
+                parts.append(_describe_card(dict(c.metadata)))
+        self.remember(to, "assistant", "\n".join(p for p in parts if p))
 
     # ------------------------------------------------------------ routing
     async def route(self, ctx, sender, text, started):
@@ -167,9 +211,15 @@ class Foreman:
                 sel = json.loads(text)
             except ValueError:
                 sel = None
+        if sel and sel.get("action") == "say":  # a quick-reply button: exactly as if the user typed it
+            text, sel = str(sel.get("text", "")).strip(), None
         action, jid = (sel or {}).get("action"), (sel or {}).get("job_id")
+        if action == "confirm_plan":
+            return await self.confirm_plan(ctx, sender, str(sel.get("plan_id", "")))
         if not action:
             action, jid = self.infer(text)
+        if action == "confirm_plan":
+            return await self.confirm_plan(ctx, sender, jid)
         if action == "submit_request":
             req = str(sel.get("request", "")).strip()
             budget = sel.get("budget")
@@ -224,12 +274,14 @@ class Foreman:
             return await self.quote(ctx, sender, jid or text, None, intro=(
                 "Searching Agentverse and my verified catalog. I'll re-test the best matches live, because a "
                 "listing or a README isn't proof."))
-        if not is_build_request(text):
-            return await self.welcome(ctx, sender)
-        return await self.quote(ctx, sender, text, None)
+        return await self.converse(ctx, sender, text)
 
     def infer(self, text: str):
         low = text.lower().strip()
+        pm = PLAN_RE.search(low)
+        if pm and any(w in low for w in ("approve", "confirm", "build it", "find or build", "go ahead", "looks right",
+                                         "clicked")) and "change" not in low:
+            return "confirm_plan", pm.group(0)
         m = JOB_RE.search(low)
         jid = m.group(0) if m else None
         if jid:
@@ -271,24 +323,96 @@ class Foreman:
             return "history", None
         if low in ("evolve", "teach", "improve", "improve yourself", "learn") or "run an evolution" in low:
             return "evolve", None
-        if low in ("", "hi", "hello", "hey", "help", "start", "menu"):
+        if low == "":
             return "welcome", None
         return None, None
 
     # ------------------------------------------------------------ steps
-    async def welcome(self, ctx, sender):
+    STARTERS = [
+        {"id": "s1", "title": "ISBN-13 validator", "subtitle": "One agent · checks and explains invalid numbers",
+         "badges": ["single agent"], "cta_label": "Plan this",
+         "selection": {"action": "say", "text": "Build an agent that validates ISBN-13 numbers"}},
+        {"id": "s2", "title": "Deployment approval desk", "subtitle": "Intake agent + reviewer agent · approve/reject card",
+         "badges": ["multi-agent"], "cta_label": "Plan this",
+         "selection": {"action": "say", "text": "Build a two-agent system: an intake agent that takes deployment "
+                                                "requests and a reviewer agent that sends me an approve/reject card"}},
+        {"id": "s3", "title": "Find an existing agent", "subtitle": "Search Agentverse, then re-test the matches live",
+         "badges": ["Agentverse"], "cta_label": "Search",
+         "selection": {"action": "say", "text": "find an agent that converts currencies"}},
+        {"id": "s4", "title": "How has FOUNDRY improved?", "subtitle": "Held-out results per skill version",
+         "badges": ["self-improving"], "cta_label": "Show me",
+         "selection": {"action": "scoreboard"}},
+    ]
+
+    async def welcome(self, ctx, sender, text: str | None = None):
         v = sk.load()
-        md = cards.form("What should FOUNDRY build?", [
-            {"name": "request", "kind": "text", "label": "Describe the agent or multi-agent system", "required": True},
-            {"name": "budget", "kind": "number", "label": "Spend cap in USD (optional)"},
-            {"name": "agents", "kind": "text", "label": "Required agent names, comma-separated (optional: makes it "
-                                                         "a multi-agent contract)"},
-        ], "Get a verified quote", {"action": "submit_request"})
-        await ctx.send(sender, chat(
-            "I'm FOUNDRY. I build Fetch.ai agents and multi-agent systems, prove they work with tests written by "
-            "a different model that never sees the code, and publish them to Agentverse. I also improve my own "
-            f"engineering process from every failure. I'm on skill version {v.version}. Say 'history' to see what "
-            "I've learned, or describe what you need.", md))
+        md = cards.carousel("Start here", "Tap one, or just tell me what you need in your own words",
+                            self.STARTERS)
+        await ctx.send(sender, chat(text or (
+            "Hi, I'm FOUNDRY. Tell me what you want an agent to do and I'll work out the design with you, then "
+            "build it, prove it with tests written by a different model, and publish it to Agentverse. I also "
+            f"learn from every defect I catch (skill version {v.version})."), md))
+
+    async def converse(self, ctx, sender, text: str):
+        """Free text goes to the concierge: a real conversation that ends in a plan the user confirms."""
+        mine = [j for j in self.jobs.values() if j.get("sender") == sender]
+        hist = self.history_of(sender)[:-1]  # the current user turn is passed separately
+        try:
+            d = await asyncio.to_thread(concierge.respond, hist, text, concierge.jobs_summary(mine))
+        except concierge.ConciergeError as e:
+            ctx.logger.warning(f"concierge fallback: {e}")
+            if is_build_request(text):
+                return await self.show_plan(ctx, sender, concierge.fallback_plan(text),
+                                            "Here's how I read your request. Confirm it, or tell me what to change.")
+            return await self.welcome(ctx, sender)
+        intent, reply = d["intent"], d.get("reply") or ""
+        if intent == "greet":
+            return await self.welcome(ctx, sender, reply or None)
+        if intent == "plan":
+            return await self.show_plan(ctx, sender, d["plan"], reply)
+        if intent == "confirm":
+            pid = next((k for k, v in reversed(list(self.plans.items())) if v["sender"] == sender), None)
+            if pid:
+                return await self.confirm_plan(ctx, sender, pid)
+            intent = "chat"
+        if intent == "find":
+            return await self.quote(ctx, sender, d.get("query") or text, None, intro=reply or None)
+        if intent == "command":
+            cmd = d["command"]
+            if cmd == "evolve" and sender not in ADMINS:
+                return await ctx.send(sender, chat(reply + "\n\nRunning a learning round is admin-only; you can "
+                                                   "still teach FOUNDRY from your own builds."))
+            if reply:
+                await ctx.send(sender, chat(reply))
+            return await {"status": self.status, "history": self.history, "scoreboard": self.scoreboard,
+                          "evolve": self.evolve}[cmd](ctx, sender)
+        if intent == "clarify" and d.get("options"):
+            md = cards.detail("Quick answer (or just type your own)", [],
+                              [(o, {"action": "say", "text": o}, i == 0) for i, o in enumerate(d["options"])])
+            return await ctx.send(sender, chat(reply, md))
+        return await ctx.send(sender, chat(reply or "Tell me a bit more about what you need."))
+
+    async def show_plan(self, ctx, sender, plan: dict, reply: str = ""):
+        pid = "plan_" + uuid4().hex[:6]
+        self.plans[pid] = {"sender": sender, "plan": plan}
+        md = cards.review(f"Build plan: {plan.get('title', 'your agent')}", concierge.plan_rows(plan),
+                          ("Find or build it", {"action": "confirm_plan", "plan_id": pid}),
+                          ("Change something", {"action": "say", "text": "I want to change something in the plan"}))
+        await ctx.send(sender, chat((reply + "\n\n" if reply else "") + f"Plan {pid}. Nothing is searched, charged "
+                                    "or built until you confirm.", md))
+
+    async def confirm_plan(self, ctx, sender, pid: str):
+        rec = self.plans.get(pid)
+        if not rec:
+            return await ctx.send(sender, chat("I don't have that plan any more. Describe what you need and I'll "
+                                               "draft it again."))
+        if rec["sender"] != sender:
+            ledger.append("auth_denied", action="confirm_plan", plan_id=pid, sender=sender)
+            return await ctx.send(sender, chat("That plan belongs to another user."))
+        plan = rec["plan"]
+        names = [a["name"] for a in plan.get("agents") or [] if a.get("name")]
+        ledger.append("plan_confirmed", plan_id=pid, sender=sender, title=plan.get("title"))
+        return await self.quote(ctx, sender, plan["request"], None, agents=names if len(names) > 1 else None)
 
     async def quote(self, ctx, sender, request, budget, intro=None, agents=None):
         if len(request) < 15:
@@ -302,9 +426,9 @@ class Foreman:
             _, msg = await asyncio.to_thread(self._make_quote, sender, request, budget, v, None, None, agents)
             return await ctx.send(sender, msg)
         await ctx.send(sender, chat(intro or (
-            "Before building anything, my Scout is searching Agentverse and my verified catalog for an agent that "
-            "already does this, then re-testing the best matches live. Nothing is reused on the strength of a "
-            "README or a search ranking.")))
+            "On it. First my Scout checks Agentverse and my verified catalog for an agent that already does this, "
+            "and re-tests the best matches live, because a README or a search rank isn't proof. This usually takes "
+            "1-3 minutes; you'll get a card either way, with reuse or a build quote.")))
         threading.Thread(target=self._scout_worker, args=(sender, request, budget, v, agents), daemon=True).start()
 
     def _make_quote(self, sender, request, budget, v, note, job=None, agents=None):
@@ -914,3 +1038,40 @@ def create_foreman_agent() -> Agent:
         return Agent(**kw, readme_path=str(config.ROOT / "README_AGENT.md"))
     except TypeError:
         return Agent(**kw)
+
+
+class _Recorder:
+    """Wraps the uAgents context so every reply FOUNDRY sends is also remembered in the conversation."""
+
+    def __init__(self, ctx, foreman):
+        self._ctx, self._f = ctx, foreman
+
+    def __getattr__(self, name):
+        return getattr(self._ctx, name)
+
+    async def send(self, to, msg, *a, **kw):
+        if isinstance(msg, ChatMessage):
+            self._f.remember_out(to, msg)
+        return await self._ctx.send(to, msg, *a, **kw)
+
+
+def _describe_user_turn(text: str) -> str:
+    if text.startswith("{"):
+        try:
+            sel = json.loads(text)
+            if sel.get("action") == "say":
+                return str(sel.get("text", ""))
+            return f"[tapped a card button: {json.dumps(sel)[:200]}]"
+        except ValueError:
+            pass
+    return text
+
+
+def _describe_card(md: dict) -> str:
+    try:
+        p = json.loads(md.get("card_payload") or "{}")
+    except ValueError:
+        return ""
+    title = p.get("title", "")
+    rows = "; ".join(f"{r.get('label')}: {r.get('value')}" for r in (p.get("summary_rows") or [])[:8])
+    return f"[showed a {md.get('card_kind')} card: {title}{' - ' + rows if rows else ''}]"[:1200]

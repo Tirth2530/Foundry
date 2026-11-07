@@ -105,6 +105,9 @@ def _foreman_with_quoted_job(monkeypatch):
         await agent.handlers[ChatMessage](ctx, "alice", ChatMessage(
             timestamp=datetime.now(timezone.utc), msg_id=uuid4(),
             content=[TextContent(type="text", text="Build an agent that reverses any text it gets, please")]))
+        from tests.test_foreman import _confirm
+        await agent.handlers[ChatMessage](ctx, "alice", ChatMessage(
+            timestamp=datetime.now(timezone.utc), msg_id=uuid4(), content=[TextContent(type="text", text=_confirm(ctx))]))
     asyncio.run(setup())
     jid = next(iter(f.jobs))
     return f, agent, ctx, jid, builds, verified

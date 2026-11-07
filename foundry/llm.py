@@ -281,8 +281,10 @@ def _out_cap(used: str, p: dict, max_tokens: int) -> int:
 
 
 def chat(messages: list[dict], *, provider: str, role: str, meter: CostMeter | None = None,
-         temperature: float | None = 0.2, max_tokens: int = 6000, retries: int = 3) -> dict:
+         temperature: float | None = 0.2, max_tokens: int = 6000, retries: int = 3,
+         reasoning_effort: str | None = None) -> dict:
     """Call a provider. Returns {text, provider, model, fell_back, usd, tokens_in, tokens_out, ...}.
+    `reasoning_effort` overrides the configured GPT reasoning effort for this call only (e.g. "low" for chat).
 
     Spend control: EVERY HTTP attempt reserves its own worst case (estimated input + the output ceiling that is
     actually sent, at the configured price) in the meter chain before it is sent, and is settled with what that
@@ -291,6 +293,8 @@ def chat(messages: list[dict], *, provider: str, role: str, meter: CostMeter | N
     cancellation both refuse the call before anything is sent."""
     used, fell_back = resolve(provider)
     p = config.PROVIDERS[used]
+    if reasoning_effort and used == "gpt" and p.get("reasoning_effort"):
+        p = {**p, "reasoning_effort": reasoning_effort}
     if meter is None:
         meter = new_meter(None, name="unattributed")
     out_cap = _out_cap(used, p, max_tokens)
