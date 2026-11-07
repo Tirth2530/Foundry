@@ -278,11 +278,12 @@ class Foreman:
         """Create (or refresh) a job with a Quartermaster quote. Returns (job, ChatMessage)."""
         q = pipeline.rpc("quartermaster", "quote", lambda request, version: quartermaster.quote(request, sk.load(version)),
                          request=request, version=v.version)
-        if budget:
-            try:
-                q["cap_usd"] = round(min(float(budget), max(q["cap_usd"], 0.05)), 2)
-            except (TypeError, ValueError):
-                pass
+        try:
+            b = float(budget) if budget not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            b = 0.0
+        if b > 0:  # the form's number field defaults to 0, which means "use the quoted cap"
+            q["cap_usd"] = round(min(b, max(q["cap_usd"], 0.05)), 2)
         if job is None:
             job = {"job_id": pipeline.new_job_id(), "sender": sender, "request": request, "created": time.time()}
             self.jobs[job["job_id"]] = job
