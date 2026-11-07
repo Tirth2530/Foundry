@@ -44,7 +44,10 @@ def sandbox(tmp_path, monkeypatch):
         if role == "architect":
             text = '{"agents":[{"name":"main","role":"does it"}],"entry":"main"}'
         elif role == "examiner":
-            text = '{"cases":[{"name":"e1","turns":[{"send":"hi","checks":[{"type":"ack"}]}]}]}'
+            text = json.dumps({"cases": [
+                {"name": "e1", "turns": [{"send": "hi", "checks": [{"type": "ack"}]}]},
+                {"name": "e1b", "turns": [{"send": "9781861972712", "checks": [
+                    {"type": "ack"}, {"type": "text_contains", "value": "VALID"}]}]}]})
         elif role == "adversary":
             text = '{"messages":["edge case"]}'
         elif role in ("builder", "repair"):
@@ -53,8 +56,15 @@ def sandbox(tmp_path, monkeypatch):
                    "\nChatAcknowledgement\nagent.include(p)\n```"
         elif role == "scout":
             import re as _re
-            ids = _re.findall(r"id=(\S+)", messages[1]["content"])
-            text = json.dumps({"best": ids[0] if ids else None, "confidence": 0.9, "reason": "same job", "gaps": []})
+            if "search queries" in sys_txt:
+                text = json.dumps({"queries": ["isbn checker", "isbn validation agent", "book number check"]})
+            elif "README" in sys_txt:
+                text = json.dumps({"claim": "validates ISBN-13", "send": "9781861972712",
+                                   "checks": [{"type": "text_contains", "value": "VALID"}]})
+            else:
+                ids = _re.findall(r"id=(\S+)", messages[1]["content"])
+                text = json.dumps({"ranked": [{"id": i, "confidence": 0.9, "reason": "same job", "gaps": []}
+                                              for i in ids[:3]]})
         elif role == "miner":
             text = '{"root_cause":"review cards use wrong keys","generalizes_because":"every review card"}'
         elif role == "evolver":

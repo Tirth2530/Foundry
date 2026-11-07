@@ -120,7 +120,17 @@ def test_conversation_reuse_path(sandbox, monkeypatch):
     found = {"found": True, "candidate": {"id": "foundry:job_abc123", "source": "foundry_catalog",
                                           "address": "agent1qcatalog", "job_id": "job_abc123"},
              "live": {"passed": True, "basis": "its original independent test", "latency_s": 8.0, "texts": ["VALID"]},
-             "match": {"confidence": 0.92, "reason": "same task", "gaps": []}}
+             "match": {"confidence": 0.92, "reason": "same task", "gaps": []},
+             "search": {"queries": ["isbn checker"], "raw_hits": 9, "kept": 3, "errors": []},
+             "search_note": "4 queries, 9 hits, 3 live chat agents kept",
+             "audits": [
+                 {"candidate": {"address": "agent1qliar", "name": "isbn-pro", "source": "agentverse_search",
+                                "platform": {"recent_success_rate": 0.99}},
+                  "need": {"passed": False, "texts": ["jokes only"]}, "claim": {"passed": False},
+                  "need_basis": "a test written from your request", "claim_text": "checks ISBNs"},
+                 {"candidate": {"address": "agent1qcatalog", "name": "FOUNDRY job_abc123", "source": "foundry_catalog"},
+                  "need": {"passed": True, "texts": ["VALID"], "latency_s": 8.0}, "claim": None,
+                  "need_basis": "its original independent test"}]}
     monkeypatch.setattr(scout, "find", lambda **kw: found)
     agent = Agent(name="foundry", seed="t2")
     fm.Foreman(agent)
@@ -140,10 +150,12 @@ def test_conversation_reuse_path(sandbox, monkeypatch):
             await asyncio.sleep(0.05)
             if any(c["card_kind"] == "review" for c in _cards(ctx.sent)):
                 break
-        offer = _cards(ctx.sent)[-1]
+        offer = [c for c in _cards(ctx.sent) if c["card_kind"] == "review"][-1]
         assert cards.validate(offer) == [] and "already does this" in offer["card_payload"]
         jid = json.loads(offer["card_payload"])["approve_cta"]["selection"]["job_id"]
-        await say(json.dumps({"action": "reuse", "job_id": jid}))
+        audit = [c for c in _cards(ctx.sent) if c["card_kind"] == "carousel"][-1]
+        assert cards.validate(audit) == [] and "failed live check" in audit["card_payload"]
+        await say(json.dumps({"action": "reuse", "job_id": jid, "pick": "1"}))
         done = _cards(ctx.sent)[-1]
         assert done["card_kind"] == "detail" and cards.validate(done) == [] and "agent1qcatalog" in done["card_payload"]
         await say(json.dumps({"action": "reuse", "job_id": jid}))

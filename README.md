@@ -9,11 +9,13 @@ verifier also covers **Trust but Verify**.
 Coding agents can already generate agents. But generated agents fail silently (ASI:One drops a card with one wrong
 key), and the systems that build them rarely learn from those failures. FOUNDRY does three things:
 
-0. **Reuses before it builds.** A Scout checks FOUNDRY's own catalog of agents it has verified, plus Agentverse
-   search as an optional hint (the search API isn't production-ready, so it's never relied on). The best match must
-   pass a test **live, right now** before it's offered: catalog agents are re-run against their original
-   independent test, and third-party agents against a test written from *your* request. Agents that fail their
-   claim are recorded and never recommended.
+0. **Searches Agentverse, then verifies.** A Scout queries the Agentverse marketplace several ways (3 model-written
+   queries, semantic and lexical, with retries). It keeps only active, chat-capable agents and adds FOUNDRY's own
+   catalog of agents it has verified. The top 3 matches are then **re-ranked by live evidence**: one relay agent calls
+   each one over ACP with (a) a test written from *your* request by the independent Examiner ("does it do what you
+   need?") and (b) a probe derived from its own README ("does it do what it claims?"). The platform's rating and
+   success rate are shown next to what was actually observed. Only an agent that passes is offered for reuse ($0).
+   If search is down, the catalog and the build path still work.
 1. **Builds** real Fetch.ai agents and multi-agent systems from a request in ASI:One. A Quartermaster quotes the cost
    and enforces a spend cap first.
 2. **Proves** they work. Acceptance tests are written by a *different model family* (Meta Llama) from the request
@@ -30,7 +32,7 @@ key), and the systems that build them rarely learn from those failures. FOUNDRY 
 | Agent | Job | Trust boundary |
 |---|---|---|
 | **Foreman** | ASI:One front door: ACP, interactive cards, Payment Protocol | only agent users talk to |
-| Scout (ASI:One LLM) | finds existing agents (verified catalog first, search as a hint) and re-tests the best one live | reuse only after a live pass |
+| Scout (ASI:One LLM) | searches Agentverse plus the verified catalog, live-tests the top 3 for need and for claims | reuse only after a live pass |
 | Quartermaster | quote from measured history, hard spend cap, actual vs quoted | prices and caps every job |
 | Architect (ASI:One LLM) | smallest system design | advisory only, marked *inferred* |
 | Builder (GPT) | writes and repairs code with the current skill version | never sees tests |
@@ -87,6 +89,8 @@ computed from the ledger.
 ## What to say in ASI:One
 - "Build an agent that converts km and mi and asks with a form card when the unit is missing" → quote → approve →
   live progress → verified card → **Publish** → live third-party call.
+- "find an agent that checks ISBN-13 numbers" → Agentverse audit carousel: each match's listing stats vs what it
+  actually did when called.
 - Ask for something FOUNDRY has already published → the Scout offers the existing agent after re-testing it live
   (**Use this agent** for $0, or **Build a new one**).
 - "history" → carousel of every self-change, with promotion-set scores, including rejected ones.

@@ -137,7 +137,7 @@ class Foreman:
             return await ctx.send(sender, chat(f"I couldn't find job {jid}. Say 'status' to see your jobs."))
         handlers = {
             "approve_quote": lambda: self.approve(ctx, sender, self.jobs[jid]),
-            "reuse": lambda: self.reuse(ctx, sender, self.jobs[jid]),
+            "reuse": lambda: self.reuse(ctx, sender, self.jobs[jid], (sel or {}).get("pick")),
             "build_new": lambda: self.build_new(ctx, sender, self.jobs[jid]),
             "reject_quote": lambda: self.reject(ctx, sender, self.jobs[jid]),
             "publish": lambda: self.publish(ctx, sender, self.jobs[jid]),
@@ -150,6 +150,10 @@ class Foreman:
         }
         if action in handlers:
             return await handlers[action]()
+        if action == "find":
+            return await self.quote(ctx, sender, jid or text, None, intro=(
+                "Searching Agentverse and my verified catalog. I'll re-test the best matches live, because a "
+                "listing or a README isn't proof."))
         if len(text) < 25:
             return await self.welcome(ctx, sender)
         return await self.quote(ctx, sender, text, None)
@@ -171,6 +175,9 @@ class Foreman:
                 return "evidence", jid
             if any(w in low for w in ("approve", "confirm", "accept", "go ahead", "proceed")):
                 return "approve_quote", jid
+        m = re.match(r"(?:find|search(?: agentverse)?(?: for)?|is there an agent(?: that)?)\s+(.{8,})", low)
+        if m:
+            return "find", text[len(text) - len(m.group(1)):]
         m = re.match(r"rollback\s+(v\d{4})", low)
         if m:
             return "rollback", m.group(1)
@@ -197,16 +204,17 @@ class Foreman:
             f"engineering process from every failure. I'm on skill version {v.version}. Say 'history' to see what "
             "I've learned, or describe what you need.", md))
 
-    async def quote(self, ctx, sender, request, budget):
+    async def quote(self, ctx, sender, request, budget, intro=None):
         if len(request) < 15:
             return await self.welcome(ctx, sender)
         v = sk.load()
         if not (scout.catalog() or config.AGENTVERSE_API_KEY):
             _, msg = await asyncio.to_thread(self._make_quote, sender, request, budget, v, None)
             return await ctx.send(sender, msg)
-        await ctx.send(sender, chat("Before building anything, my Scout is checking whether an agent that already does "
-                                    "this exists, and if so, re-testing it live. Nothing is reused on the strength of "
-                                    "a README or a search ranking."))
+        await ctx.send(sender, chat(intro or (
+            "Before building anything, my Scout is searching Agentverse and my verified catalog for an agent that "
+            "already does this, then re-testing the best matches live. Nothing is reused on the strength of a "
+            "README or a search ranking.")))
         threading.Thread(target=self._scout_worker, args=(sender, request, budget, v), daemon=True).start()
 
     def _make_quote(self, sender, request, budget, v, note, job=None):
@@ -243,11 +251,15 @@ class Foreman:
                                request=request)
         except Exception as e:  # noqa: BLE001 - discovery is optional; building is always available
             res = {"found": False, "error": f"{type(e).__name__}: {e}"}
-        if res.get("found"):
-            c, live = res["candidate"], res["live"]
+        job = None
+        if res.get("audits") or res.get("found"):
             job = {"job_id": pipeline.new_job_id(), "sender": sender, "request": request, "created": time.time()}
             self.jobs[job["job_id"]] = job
-            self._update(job, status="reuse_offer", scout=res, budget=budget)
+            self._update(job, status="reuse_offer" if res.get("found") else "scouted", scout=res, budget=budget)
+        if res.get("audits"):
+            self.later(sender, self.audit_message(job, res))
+        if res.get("found"):
+            c, live = res["candidate"], res["live"]
             src = "FOUNDRY verified catalog" if c["source"] == "foundry_catalog" else \
                 "Agentverse search (third-party listing, verified by me just now)"
             md = cards.review("An existing agent already does this", [
@@ -261,8 +273,34 @@ class Foreman:
             ], ("Use this agent", {"action": "reuse", "job_id": job["job_id"]}),
                 ("Build a new one", {"action": "build_new", "job_id": job["job_id"]}))
             return self.later(sender, chat("Found one, and it passed a live re-check just now. Use it, or build new?", md))
-        _, msg = self._make_quote(sender, request, budget, v, self._scout_note(res))
+        _, msg = self._make_quote(sender, request, budget, v, self._scout_note(res), job)
         self.later(sender, msg)
+
+    def audit_message(self, job, res) -> ChatMessage:
+        items = []
+        for i, a in enumerate(res["audits"]):
+            c, need, claim = a["candidate"], a.get("need") or {}, a.get("claim")
+            verdict = "PASS" if need.get("passed") else ("no reply" if not need.get("texts") else "FAIL")
+            claim_v = "-" if claim is None else ("PASS" if claim.get("passed") else "FAIL")
+            plat = c.get("platform") or {}
+            plat_txt = (f"listing says {plat['recent_success_rate']:.0%} success · " if isinstance(
+                plat.get("recent_success_rate"), (int, float)) else "")
+            reply = (need.get("texts") or ["(no reply)"])[0][:70]
+            items.append({
+                "id": str(i), "title": str(c.get("name") or c["address"][:18])[:60],
+                "subtitle": f"Does what you need: {verdict} · Does what it claims: {claim_v}",
+                "secondary_text": f"{plat_txt}we observed: {reply!r}",
+                "badges": ["verified live" if need.get("passed") else "failed live check",
+                           "FOUNDRY catalog" if c["source"] == "foundry_catalog" else "Agentverse search"],
+                "cta_label": "Use this agent" if need.get("passed") else "See evidence",
+                "selection": {"action": "reuse", "job_id": job["job_id"], "pick": str(i)} if need.get("passed")
+                else {"action": "status"},
+            })
+        sr = res.get("search", {})
+        return chat(f"Agentverse audit: {res['search_note']}. I live-tested {len(items)} best match(es). The "
+                    f"platform's own ranking and ratings are shown, but only the live results count.",
+                    cards.carousel("Searched, then verified", f"queries: {', '.join(sr.get('queries', [])[:3])}"[:120],
+                                   items))
 
     @staticmethod
     def _scout_note(res: dict) -> str:
@@ -280,10 +318,18 @@ class Foreman:
         return (f"No existing agent matched (checked {n.get('catalog', 0)} verified catalog entries; Agentverse "
                 f"search: {res.get('search_note', 'n/a')}).")
 
-    async def reuse(self, ctx, sender, job):
-        if job["status"] != "reuse_offer":
+    async def reuse(self, ctx, sender, job, pick=None):
+        if job["status"] not in ("reuse_offer", "scouted"):
             return await ctx.send(sender, chat(f"{job['job_id']} is {job['status']}."))
-        c, live = job["scout"]["candidate"], job["scout"]["live"]
+        c, live = job["scout"].get("candidate"), job["scout"].get("live") or {}
+        if pick is not None:
+            try:
+                a = job["scout"]["audits"][int(pick)]
+                c, live = a["candidate"], {**(a.get("need") or {}), "basis": a["need_basis"]}
+            except (IndexError, ValueError, KeyError, TypeError):
+                pass
+        if not c or not live.get("passed"):
+            return await ctx.send(sender, chat("I won't hand over an agent that didn't pass its live check."))
         self._update(job, status="reused")
         ledger.append("reuse", job_id=job["job_id"], address=c["address"], source=c["source"],
                       live_passed=live.get("passed"))
@@ -297,7 +343,7 @@ class Foreman:
         await ctx.send(sender, chat("Done. No build needed, and nothing was charged.", md))
 
     async def build_new(self, ctx, sender, job):
-        if job["status"] != "reuse_offer":
+        if job["status"] not in ("reuse_offer", "scouted"):
             return await ctx.send(sender, chat(f"{job['job_id']} is {job['status']}."))
         _, msg = await asyncio.to_thread(self._make_quote, sender, job["request"], job.get("budget"), sk.load(),
                                          "OK, building a new one.", job)
