@@ -6,7 +6,7 @@ Branch `p0-hardening` (from `dc020a8`). 46 files changed, +4,400 / −315 lines.
 
 | Level | Verified in this work? |
 |---|---|
-| Offline control logic (scripted model, scripted runner, faked Agentverse HTTP, uAgents stub) | **Yes: 107 passed** (baseline 37 passed) |
+| Offline control logic (scripted model, scripted runner, faked Agentverse HTTP, uAgents stub) | **Yes: 131 passed** (baseline 37; 107 at first review) |
 | Real uAgents runtime (`tests/test_real_engine.py`, `selftest`) | **No.** `uagents` is not installed in the build environment and package installs were blocked. 4 tests skip. `selftest` correctly exits 1 here. |
 | Real model calls, Agentverse deployment, discoverability, Stripe, ASI:One | **No.** No credentials were available. Nothing here is live evidence. |
 
@@ -144,6 +144,28 @@ $0. No paid call was made.
 
 ## Reproduce
 ```bash
-python -m pytest -q tests               # 107 passed here; the real-engine module skips without uagents
+python -m pytest -q tests               # 131 passed here; the real-engine module skips without uagents
 python -m foundry lint                  # 35 specs, manifest match, no leakage, exit 0
 ```
+
+## Review round 1: three fixes from the independent audit
+
+Each fix was checked by running its new tests against the code before the fix (they fail) and after (they pass).
+
+| # | Issue | Fix | New tests | On pre-fix code |
+|---|---|---|---|---|
+| 1 | `pipeline.rpc` released a role agent's grant in `finally`, then booked its usage via `add()`; a concurrent job could reserve the gap and exceed the project cap | `CostMeter.settle_grant`: release + commit in one locked step; an unreported or failed role call is charged the whole grant (`unreconciled`) | `tests/test_budget_network.py` (6): real `Transport` → role-agent handler (allowlist) → `execute` (detached meter) → `RoleResult`, 8 concurrent builds over an in-process bus; forced interleaving; timeout; exception; remote cap; documented serialization limit | 3 of 6 fail |
+| 2 | `topology.evaluate` passed a processed receive with no corresponding send | delivery counts only if send + receive match on sender, receiver, correlation id, the send did not error, and both are in a passing test window; incomplete evidence → UNVERIFIED (FAIL outranks) | 6 in `tests/test_collaboration.py`; the real-engine test now also asserts the matched pair on the real runtime | 6 of 6 fail |
+| 3 | user asks for multi-agent, Architect proposes one agent → NOT TESTED | `foundry/contract.py`: deterministic contract from the user's words / form, validated, sealed, shown on Card A, approved (hash in ledger), enforced as approved; passport checks it | `tests/test_contract.py` (12) | the audit scenario (2 cases) fails |
+
+Notes:
+- The concurrent stress test passes on pre-fix code too: under the GIL the race window is too small to hit by
+  chance. The forced-interleaving test is the one that proves the fix; the stress test guards the invariants
+  (cap never exceeded, exact accounting, ≥2 grants really held at once, 40/40 stable runs).
+- Contract parser vs benchmark: it reproduces every dev and promotion topology exactly (names, entry, must-receive),
+  returns no contract for any single-agent spec, and agrees with all 9 final specs. The final-set check reads
+  read-only, prints nothing and records no opening.
+- Cross-process budget limits are documented in `docs/BUDGETS.md`. One process per budget is enforced; two FOUNDRY
+  processes do not see each other's reservations.
+- Unchanged: `skills/versions/v0000`, `bench/sealed/final`, `bench/` as a whole since the first review, and all 4
+  real-runtime tests (strengthened, not mocked).

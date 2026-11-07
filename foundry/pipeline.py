@@ -12,7 +12,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import config, ledger, llm, topology as topo, trace as trace_mod
+from . import config, contract as contract_mod, ledger, llm, topology as topo, trace as trace_mod
 from .harness import run as harness
 from .roles import adversary, architect, builder, card_validator, examiner, integrator
 
@@ -118,9 +118,11 @@ def _rpc(role: str, op: str, fn, *, skills=None, meter=None, events=None, **kw):
 
 def build(request: str, skills, *, budget_usd: float | None = None, job_id: str | None = None,
           hidden_tests: list | None = None, spec_id: str | None = None, progress=None,
-          out_dir: Path | None = None, topology: dict | None = None, parent_meter=None, cancel=None) -> dict:
+          out_dir: Path | None = None, topology: dict | None = None, parent_meter=None, cancel=None,
+          contract: dict | None = None) -> dict:
     """parent_meter: an enclosing budget (evolution run, comparison arm); cancel: threading.Event that stops
-    every later paid stage (checked before each stage and before each model call)."""
+    every later paid stage (checked before each stage and before each model call); contract: the user's sealed,
+    approved topology contract (foundry.contract). Without one, it is derived from the request text."""
     job_id = job_id or new_job_id()
     jd = out_dir or (config.RUNS / job_id)
     tracer = trace_mod.current() if (trace_mod.current() and trace_mod.current().trace_id == job_id) else \
@@ -129,14 +131,14 @@ def build(request: str, skills, *, budget_usd: float | None = None, job_id: str 
                                                  budget_usd=budget_usd) as attrs:
         res = _build(request, skills, budget_usd=budget_usd, job_id=job_id, hidden_tests=hidden_tests,
                      spec_id=spec_id, progress=progress, jd=jd, topology=topology, parent_meter=parent_meter,
-                     cancel=cancel)
+                     cancel=cancel, contract=contract)
         attrs.update(status=res["status"], usd=res["cost"]["total_usd"], attempts=len(res["attempts"]),
                      collaboration=(res.get("collaboration") or {}).get("status"))
         return res
 
 
 def _build(request, skills, *, budget_usd, job_id, hidden_tests, spec_id, progress, jd, topology,
-           parent_meter, cancel) -> dict:
+           parent_meter, cancel, contract) -> dict:
     meter = llm.new_meter(budget_usd, parent=parent_meter, name=f"build {job_id}", job_id=job_id, cancel_event=cancel)
     events: list = []
     _say = progress or (lambda stage, info=None: None)
@@ -153,7 +155,21 @@ def _build(request, skills, *, budget_usd, job_id, hidden_tests, spec_id, progre
     _write(jd / "request.txt", request)
     try:
         say("plan")
+        # The USER's topology contract is fixed BEFORE any model designs anything. It comes from the approved,
+        # sealed contract (Foreman) or, for CLI/benchmark runs, from the request text itself (no model involved).
+        if contract is not None:
+            contract_mod.check_sealed(contract)
+        else:
+            contract = contract_mod.derive(request, source="request text (CLI or benchmark run)")
+        result["contract"] = contract
+        _write(jd / "contract.json", contract or {"multi_agent": False})
         plan = rpc("architect", "plan", architect.plan, skills=skills, meter=meter, events=events, request=request)
+        plan_n = len([a for a in (plan or {}).get("agents", []) if isinstance(a, dict)])
+        if contract and plan_n < contract["min_agents"]:
+            result["plan_conflict"] = (f"Architect proposed {plan_n} agent(s); your contract requires at least "
+                                       f"{contract['min_agents']}. The contract is enforced, not the plan.")
+        # precedence: benchmark spec topology > user contract > Architect plan (fallback only)
+        required_base = topology or contract_mod.requirement(contract)
         _write(jd / "plan.json", plan)
         result["plan"] = plan
 
@@ -192,7 +208,7 @@ def _build(request, skills, *, budget_usd, job_id, hidden_tests, spec_id, progre
                 audit = rpc("card_validator", "audit", card_validator.audit, raw=run["raw"])
                 names = [a["name"] for a in art["agents"]]
                 collab = topo.evaluate(run["raw"], names, art["entry"],
-                                       topology or topo.required_from_plan(plan, names), verify_results)
+                                       required_base or topo.required_from_plan(plan, names), verify_results)
                 rec["collaboration"] = collab
                 rec["traffic"] = run["raw"].get("traffic")
                 rec["traffic_tap"] = run["raw"].get("traffic_tap")
@@ -271,6 +287,7 @@ def _build(request, skills, *, budget_usd, job_id, hidden_tests, spec_id, progre
                   hidden={k: v for k, v in (result.get("hidden") or {}).items() if k != "failures"} or None,
                   usd=result["cost"]["total_usd"], seconds=result["seconds"], attempts=len(result["attempts"]),
                   collaboration=(result.get("collaboration") or {}).get("status"),
+                  contract_sha256=(result.get("contract") or {}).get("sha256"),
                   code_sha256=_code_sha(jd))
     if hidden_tests is None and (jd / "final" / "agents").exists():
         try:  # user builds get a Proof Passport (benchmark builds are summarised by the judge instead)

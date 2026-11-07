@@ -25,7 +25,7 @@ from uagents_core.contrib.protocols.payment import (
     CommitPayment, CompletePayment, Funds, RejectPayment, RequestPayment, payment_protocol_spec,
 )
 
-from .. import cards, config, jobs as jobs_mod, ledger, llm, pipeline, skills as sk
+from .. import cards, config, contract as contract_mod, jobs as jobs_mod, ledger, llm, pipeline, skills as sk
 from ..roles import livecheck, publisher, quartermaster, scout
 from . import payments
 
@@ -152,7 +152,8 @@ class Foreman:
         if action == "submit_request":
             req = str(sel.get("request", "")).strip()
             budget = sel.get("budget")
-            return await self.quote(ctx, sender, req, budget)
+            agents = [a.strip() for a in str(sel.get("agents") or "").split(",") if a.strip()]
+            return await self.quote(ctx, sender, req, budget, agents=agents or None)
         job_actions = ("approve_quote", "reject_quote", "publish", "evidence", "reuse", "build_new", "learn",
                        "recheck", "cancel", "passport", "permissions", "reject_publication")
         if action in job_actions and jid not in self.jobs:
@@ -257,6 +258,8 @@ class Foreman:
         md = cards.form("What should FOUNDRY build?", [
             {"name": "request", "kind": "text", "label": "Describe the agent or multi-agent system", "required": True},
             {"name": "budget", "kind": "number", "label": "Spend cap in USD (optional)"},
+            {"name": "agents", "kind": "text", "label": "Required agent names, comma-separated (optional: makes it "
+                                                         "a multi-agent contract)"},
         ], "Get a verified quote", {"action": "submit_request"})
         await ctx.send(sender, chat(
             "I'm FOUNDRY. I build Fetch.ai agents and multi-agent systems, prove they work with tests written by "
@@ -264,20 +267,24 @@ class Foreman:
             f"engineering process from every failure. I'm on skill version {v.version}. Say 'history' to see what "
             "I've learned, or describe what you need.", md))
 
-    async def quote(self, ctx, sender, request, budget, intro=None):
+    async def quote(self, ctx, sender, request, budget, intro=None, agents=None):
         if len(request) < 15:
             return await self.welcome(ctx, sender)
+        try:  # the user's topology contract is fixed and validated before anything is built or priced
+            contract_mod.derive(request, explicit_agents=agents)
+        except contract_mod.ContractError as e:
+            return await ctx.send(sender, chat(f"I can't use those agent names: {e}. Please resend the request."))
         v = sk.load()
         if not (scout.catalog() or config.AGENTVERSE_API_KEY):
-            _, msg = await asyncio.to_thread(self._make_quote, sender, request, budget, v, None)
+            _, msg = await asyncio.to_thread(self._make_quote, sender, request, budget, v, None, None, agents)
             return await ctx.send(sender, msg)
         await ctx.send(sender, chat(intro or (
             "Before building anything, my Scout is searching Agentverse and my verified catalog for an agent that "
             "already does this, then re-testing the best matches live. Nothing is reused on the strength of a "
             "README or a search ranking.")))
-        threading.Thread(target=self._scout_worker, args=(sender, request, budget, v), daemon=True).start()
+        threading.Thread(target=self._scout_worker, args=(sender, request, budget, v, agents), daemon=True).start()
 
-    def _make_quote(self, sender, request, budget, v, note, job=None):
+    def _make_quote(self, sender, request, budget, v, note, job=None, agents=None):
         """Create (or refresh) a job with a Quartermaster quote. Returns (job, ChatMessage)."""
         q = pipeline.rpc("quartermaster", "quote", lambda request, version: quartermaster.quote(request, sk.load(version)),
                          request=request, version=v.version)
@@ -290,7 +297,10 @@ class Foreman:
             job = {"job_id": pipeline.new_job_id(), "sender": sender, "request": request, "created": time.time()}
             self.jobs[job["job_id"]] = job
         jid = job["job_id"]
-        self._update(job, quote=q, status="quoted", skills_version=v.version)
+        agents = agents if agents is not None else job.get("contract_agents")
+        contract = contract_mod.derive(request, explicit_agents=agents)
+        self._update(job, quote=q, status="quoted", skills_version=v.version, contract=contract,
+                     contract_agents=agents)
         pay = "Stripe test checkout" if payments.enabled() else "demo mode (no charge)"
         scout_res = job.get("scout") or {}
         n_checked = len(scout_res.get("audits") or [])
@@ -300,8 +310,9 @@ class Foreman:
              (note or "no matching agent found")[:160]),
             ("Recommendation", "build new: nothing existing passed a live test of your request" if n_checked else
              "build new"),
-            ("Proposed architecture", "designed by the Architect after approval; it is a proposal (INFERRED) "
-                                      "until the independent tests and observed agent traffic confirm it"),
+            ("Required architecture (your contract)", contract_mod.describe(contract)),
+            ("Proposed architecture", "designed by the Architect after approval; it is a proposal (INFERRED). "
+                                      "If it conflicts with your contract, your contract is enforced"),
             ("Estimated build cost", f"${q['estimate_usd']:.3f} model spend ({q['basis']}); hosting "
                                      "not metered"),
             ("Spending limit", f"${q['cap_usd']:.2f} hard cap: {q['on_exhaustion']}"),
@@ -333,7 +344,7 @@ class Foreman:
             ("Cancel", {"action": "reject_quote", "job_id": job["job_id"]}, False)])
         await ctx.send(sender, chat("These are the only things this job can do:", md))
 
-    def _scout_worker(self, sender, request, budget, v):
+    def _scout_worker(self, sender, request, budget, v, agents=None):
         try:
             res = pipeline.rpc("scout", "find", scout.find, skills=v, meter=llm.new_meter(0.30, name="scout"), events=[],
                                request=request)
@@ -343,7 +354,8 @@ class Foreman:
         if res.get("audits") or res.get("found"):
             job = {"job_id": pipeline.new_job_id(), "sender": sender, "request": request, "created": time.time()}
             self.jobs[job["job_id"]] = job
-            self._update(job, status="reuse_offer" if res.get("found") else "scouted", scout=res, budget=budget)
+            self._update(job, status="reuse_offer" if res.get("found") else "scouted", scout=res, budget=budget,
+                         contract_agents=agents)
         if res.get("audits"):
             self.later(sender, self.audit_message(job, res))
         if res.get("found"):
@@ -361,7 +373,7 @@ class Foreman:
             ], ("Use this agent", {"action": "reuse", "job_id": job["job_id"]}),
                 ("Build a new one", {"action": "build_new", "job_id": job["job_id"]}))
             return self.later(sender, chat("Found one, and it passed a live re-check just now. Use it, or build new?", md))
-        _, msg = self._make_quote(sender, request, budget, v, self._scout_note(res), job)
+        _, msg = self._make_quote(sender, request, budget, v, self._scout_note(res), job, agents)
         self.later(sender, msg)
 
     def audit_message(self, job, res) -> ChatMessage:
@@ -446,6 +458,12 @@ class Foreman:
     async def approve(self, ctx, sender, job):
         if job["status"] != "quoted":
             return await ctx.send(sender, chat(f"{job['job_id']} is already {job['status']}."))
+        c = job.get("contract")
+        # the approval tap approves exactly the contract shown on the card: record its hash
+        self._update(job, contract_approval={"by": sender, "t": time.time(), "sha256": (c or {}).get("sha256"),
+                                             "multi_agent": bool(c)})
+        ledger.append("contract_approved", job_id=job["job_id"], by=sender, contract_sha256=(c or {}).get("sha256"),
+                      min_agents=(c or {}).get("min_agents"))
         if payments.enabled():
             co = await asyncio.to_thread(payments.create_checkout, job["quote"]["price_usd"], job["job_id"],
                                          sender, job["request"])
@@ -524,10 +542,15 @@ class Foreman:
             elif stage == "repair":
                 self.later(sender, chat(f"Attempt {info['attempt']} failed verification, so the Builder is "
                                         f"repairing it. First failure: {info['why'][:220]}"))
+        c, appr = job.get("contract"), job.get("contract_approval") or {}
+        if (c or {}).get("sha256") != appr.get("sha256"):
+            self._update(job, status="error", error="contract differs from the one you approved")
+            return self.later(sender, chat(f"{jid}: the topology contract differs from the one you approved, so I "
+                                           "stopped before building. Nothing was spent."))
         try:
             res = pipeline.build(job["request"], sk.load(job.get("skills_version")),
                                  budget_usd=job["quote"]["cap_usd"], job_id=jid, progress=progress,
-                                 cancel=self.cancels.get(jid))
+                                 cancel=self.cancels.get(jid), contract=c)
         except Exception as e:  # noqa: BLE001
             self._update(job, status="error", error=str(e))
             return self.later(sender, chat(f"{jid} hit an unrecoverable error: {e}. Evidence is in runs/{jid}/."))

@@ -97,7 +97,7 @@ to the levels in this table; nothing scripted or mocked is presented as a live r
 
 | Level | What runs | Where | Status in this repo |
 |---|---|---|---|
-| 1. Offline, scripted | real FOUNDRY control logic; model + runner replaced by scripts; Agentverse HTTP faked | `pytest` (stubbed uAgents) | **107 passed** |
+| 1. Offline, scripted | real FOUNDRY control logic; model + runner replaced by scripts; Agentverse HTTP faked | `pytest` (stubbed uAgents) | **131 passed** |
 | 2. Real uAgents | real runtime, real sandboxed runner, real ACP messages, real traffic taps | `tests/test_real_engine.py`, `selftest` | needs `pip install -r requirements.txt`; **not run here** |
 | 3. Real models | GPT / Llama / ASI:One calls with metered spend | `build`, `learn`, `evolve` | needs keys; **not run** |
 | 4. Agentverse live | deploy, live third-party ACP call, search-index discovery, confirmed teardown | `gate1`, `build --publish`, `recheck` | needs key; **not run** |
@@ -147,15 +147,19 @@ and C full evolved on the untouched final set (same tasks, tests and $/build cap
 - **Release gate (fail-closed):** `verified` requires, on the FINAL artifact: every independent test passed, static
   gate clean, every card valid, no load errors, and for multi-agent systems **observed collaboration**: each
   required peer *processed* (handler ran, no exception) a message from another generated agent during a *passing*
-  test. Send-side and receive-side taps record sender, recipient, type, correlation id and time. If either tap is
-  missing, collaboration is **UNVERIFIED** and the build is not verified. One agent pretending to be three fails.
-  Agent names in the Architect's plan become requirements; the plan itself is never evidence.
+  test. A delivery counts only when the send record and the processed-receive record match on sender, receiver and
+  correlation id and both lie in a passing test's window. A missing tap, an unmatched receive or no test window
+  gives **UNVERIFIED**, and the build is not verified. One agent pretending to be three fails.
+- **User topology contract:** the required agents come from the user's own words (deterministic parser, no model)
+  or from the request form. The contract is shown on the capability card, sealed with SHA-256, approved by the
+  user's tap, and enforced as approved. Precedence: benchmark spec > user contract > Architect plan (fallback
+  only). An Architect that proposes one agent for a multi-agent request cannot make the build pass.
 - **Publication states:** `FAILED` (torn down) · `DEPLOYED` (running, profile written, live ACP call acknowledged
   **and** behaviourally correct, not yet in the search index) · `DISCOVERABLE` (also returned by Agentverse search).
   Only `DISCOVERABLE` is called published. Teardown is confirmed by a 404, otherwise reported as unconfirmed.
   Progress is written after every created agent, so `recover` can clean up after a crash; a retry never deploys a
   duplicate. Code containing any factory credential is refused before upload.
-- **Budgets:** every model call reserves its worst case (input estimate + the **full** output-token ceiling at the
+- **Budgets** (details and cross-process limits: `docs/BUDGETS.md`)**:** every model call reserves its worst case (input estimate + the **full** output-token ceiling at the
   configured price) atomically across job → evolution run → project, plus per-provider ceilings, before sending.
   Actual cost replaces the reservation afterwards. Unknown pricing is refused. Cancellation stops later stages.
   Estimated, calculated and provider-reported costs are kept separate (`evidence/usage.db`). Limit: a provider can

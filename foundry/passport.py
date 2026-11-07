@@ -27,7 +27,7 @@ STATUSES = ("PASS", "FAIL", "UNVERIFIED", "NOT TESTED")
 KINDS = ("OBSERVED", "INFERRED")
 HARNESS_FILES = ("foundry/harness/runner.py", "foundry/harness/run.py", "foundry/dsl.py", "foundry/topology.py",
                  "foundry/cards.py", "foundry/static_check.py")
-REQUIRED = ("schema", "passport_id", "build", "spec", "code", "skills", "models", "harness", "environment",
+REQUIRED = ("schema", "passport_id", "build", "spec", "contract", "code", "skills", "models", "harness", "environment",
             "examiner", "tests", "collaboration", "security", "cards", "external_actions", "publication", "spend",
             "claims", "limitations", "untested_assumptions", "evidence", "experiments", "ledger_anchor", "verdict",
             "integrity")
@@ -204,6 +204,7 @@ def build_passport(job_id: str, job_dir: Path | None = None) -> dict:
                   "attempts": len(res.get("attempts") or []), "foundry_revision": _git_revision(),
                   "issued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
         "spec": {"request_sha256": sha256_bytes(request.encode()), "request_excerpt": request[:240]},
+        "contract": _contract_section(res.get("contract"), jd),
         "code": {**code_digest(jd), "entry": (res.get("artifact") or {}).get("entry"),
                  "agent_count": len((res.get("artifact") or {}).get("agents") or [])},
         "skills": {"version": res.get("skills_version"), "digest": _skills_digest(res.get("skills_version"))},
@@ -240,6 +241,16 @@ def build_passport(job_id: str, job_dir: Path | None = None) -> dict:
     body["integrity"] = {"body_sha256": sha256_bytes(canonical(body)),
                          "note": "sha256 over the canonical JSON of every other field; not a signature"}
     return body
+
+
+def _contract_section(c: dict | None, jd: Path) -> dict:
+    job = json.loads((jd / "job.json").read_text()) if (jd / "job.json").exists() else {}
+    appr = job.get("contract_approval")
+    return {"multi_agent": bool(c), "min_agents": (c or {}).get("min_agents", 1), "agents": (c or {}).get("agents"),
+            "entry": (c or {}).get("entry"), "must_receive": (c or {}).get("must_receive"),
+            "source": (c or {}).get("source"), "sha256": (c or {}).get("sha256"), "body": c,
+            "approved_by_user": bool(appr) and appr.get("sha256") == (c or {}).get("sha256"),
+            "approval": appr, "derived_by": "deterministic parser of the user's words (no model)"}
 
 
 def _skills_digest(version: str | None) -> str | None:
@@ -331,6 +342,19 @@ def validate(path: Path, runs_dir: Path | None = None) -> list[str]:
             problems.append("verdict VERIFIED but multi-agent collaboration was not observed")
         if pp["examiner"].get("certifies_itself"):
             problems.append("verdict VERIFIED by a builder that certified itself")
+    con = pp["contract"]
+    if con.get("multi_agent"):
+        from . import contract as contract_mod
+        body = con.get("body") or {}
+        if con.get("sha256") != contract_mod.digest(body) or body.get("sha256") != con.get("sha256"):
+            problems.append("contract digest does not match its body (the user contract was altered)")
+        if pp["verdict"] == "VERIFIED":
+            if pp["collaboration"]["status"] != "PASS":
+                problems.append(f"verdict VERIFIED but the user contract requires {con.get('min_agents')} agents and "
+                                f"collaboration is {pp['collaboration']['status']}")
+            if pp["code"]["agent_count"] < (con.get("min_agents") or 0):
+                problems.append(f"verdict VERIFIED with {pp['code']['agent_count']} agent(s); the user contract "
+                                f"requires at least {con.get('min_agents')}")
     pub = pp["publication"]
     if pub["status"] == "DISCOVERABLE" and pub.get("discoverable") != "PASS":
         problems.append("publication DISCOVERABLE without a passing discoverability check")
@@ -354,6 +378,10 @@ def summary_rows(pp: dict) -> list[tuple[str, str]]:
             if ev.get("peers") else "")),
         ("Security", f"static gate {pp['security']['static_gate']} · sandbox {pp['security']['sandbox']} · "
                      "no credentials in sandbox"),
+        ("User contract", ("at least " + str(pp["contract"]["min_agents"]) + " agents"
+                           + (f" ({', '.join(pp['contract']['agents'])})" if pp["contract"].get("agents") else "")
+                           + (" · approved by you" if pp["contract"].get("approved_by_user") else "")
+                           ) if pp["contract"]["multi_agent"] else "single agent (no multi-agent requirement)"),
         ("Cards", f"{pp['cards']['status']} ({pp['cards']['emitted']} emitted)"),
         ("External actions", "; ".join(f"{r['action'][:50]}: {r['status']}" for r in rx) or "none yet"),
         ("Publication", f"{pp['publication']['status']} · discoverable {pp['publication']['discoverable']}"),

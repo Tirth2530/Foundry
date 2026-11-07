@@ -72,6 +72,10 @@ def test_real_multi_agent_traffic_is_observed():
     assert topology.check_spec(req, raw, ["upper", "coordinator"], "coordinator", out["results"]) == []
     hand_off = [r for r in raw["received_log"] if r["from"] == "coordinator" and r["to"] == "upper"]
     assert hand_off and hand_off[0]["ok"] and hand_off[0]["corr"]
+    # issue 2: the SAME correlation id must appear on the real send side (computed independently by the send tap)
+    sent = [t for t in raw["traffic_log"] if t["from"] == "coordinator" and t["to"] == "upper"]
+    assert any(t["corr"] == hand_off[0]["corr"] and not t.get("send_error") for t in sent), (sent, hand_off)
+    assert topology.evaluate(raw, ["upper", "coordinator"], "coordinator", req, out["results"])["status"] == "PASS"
     # the same outputs from ONE agent must FAIL the collaboration check
     only_client = {**raw, "received_log": [r for r in raw["received_log"] if r["from"] == "client"]}
     assert topology.check_spec(req, only_client, ["upper", "coordinator"], "coordinator", out["results"])
