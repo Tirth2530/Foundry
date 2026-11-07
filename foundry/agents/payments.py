@@ -2,9 +2,12 @@
 is configured, FOUNDRY runs in demo mode and says so on the quote card."""
 from __future__ import annotations
 
+import logging
 import time
 
 from .. import config
+
+logging.getLogger("stripe").setLevel(logging.WARNING)  # one INFO line per poll is noise
 
 
 def enabled() -> bool:
@@ -58,11 +61,17 @@ def verify(session_id: str, job_id: str, expected_cents: int) -> tuple[bool, str
     import stripe
     stripe.api_key = config.STRIPE_SECRET_KEY
     s = stripe.checkout.Session.retrieve(session_id)
-    if getattr(s, "payment_status", None) != "paid":
+    try:  # StripeObject is not a dict in newer stripe-python: convert before reading fields
+        d = s.to_dict() if hasattr(s, "to_dict") else s.to_dict_recursive()
+    except Exception:  # noqa: BLE001
+        d = {k: s[k] for k in ("payment_status", "metadata", "amount_total") if k in s}
+    if d.get("payment_status") != "paid":
         return False, "payment not completed yet"
-    md = getattr(s, "metadata", {}) or {}
+    md = d.get("metadata") or {}
+    if hasattr(md, "to_dict"):
+        md = md.to_dict()
     if md.get("job_id") != job_id:
         return False, "session belongs to a different job"
-    if int(getattr(s, "amount_total", 0) or 0) != expected_cents:
+    if int(d.get("amount_total") or 0) != expected_cents:
         return False, "amount mismatch"
     return True, "paid"

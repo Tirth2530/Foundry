@@ -95,6 +95,10 @@ class Foreman:
         async def _start(ctx: Context):
             self.loop = asyncio.get_running_loop()
             self.ctx = ctx
+            for j in list(self.jobs.values()):  # resume payment watching after a restart: a paid job still builds
+                if j.get("status") == "awaiting_payment" and j.get("checkout_id") and not j.get("paid") \
+                        and payments.enabled():
+                    asyncio.get_running_loop().create_task(self._watch_payment(j["sender"], j))
             ctx.logger.info(f"FOUNDRY Foreman live at {ctx.agent.address} (skills {sk.current_version()}, "
                             f"mode {'agent network' if pipeline.TRANSPORT else 'direct'})")
 
