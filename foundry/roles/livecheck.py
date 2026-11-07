@@ -17,16 +17,33 @@ def pick_case(cases: list[dict]) -> dict | None:
 
 
 def judge(case: dict, reply: dict) -> dict:
-    """Judge one live reply ({texts, acked, latency_s, ...}) against the case's first turn."""
+    """Judge one live reply ({texts, acked, latency_s, ...}) against the case's first turn.
+    The relay may resend a probe while waiting, so the agent can legitimately answer the same probe more than
+    once: identical replies are de-duplicated, and each distinct reply is also judged on its own (a pass needs
+    ONE reply that satisfies every check, never a mix of replies)."""
     turn = case["turns"][0]
-    rec = {"replies": [{"texts": reply.get("texts", []), "metadata": [], "end_session": False}]
-           if reply.get("texts") else [], "acked": reply.get("acked")}
     checks = [c for c in turn.get("checks", []) if c["type"] in LIVE_CHECK_TYPES]
-    res = dsl.evaluate_turn({"send": turn["send"], "checks": checks}, rec)
-    content = [c for c in res if c["type"] != "ack"]
-    # an acknowledgement alone proves liveness, not behaviour: require at least one content check
-    passed = bool(content) and all(c["ok"] for c in res)
-    return {**reply, "checks": res, "passed": passed, "case": case.get("name")}
+    texts = list(reply.get("texts") or [])
+    distinct = list(dict.fromkeys(texts))
+    variants = [distinct] + ([[t] for t in distinct] if len(distinct) > 1 else [])
+
+    def one(ts):
+        rec = {"replies": [{"texts": ts, "metadata": [], "end_session": False}] if ts else [],
+               "acked": reply.get("acked")}
+        res = dsl.evaluate_turn({"send": turn["send"], "checks": checks}, rec)
+        content = [c for c in res if c["type"] != "ack"]
+        # an acknowledgement alone proves liveness, not behaviour: require at least one content check
+        return res, bool(content) and all(c["ok"] for c in res)
+
+    res, passed = one(variants[0])
+    for v in variants[1:]:
+        if passed:
+            break
+        r2, p2 = one(v)
+        if p2:
+            res, passed = r2, True
+    return {**reply, "checks": res, "passed": passed, "case": case.get("name"),
+            "duplicate_replies": len(texts) - len(distinct)}
 
 
 def run(client: agentverse.Client, address: str, case: dict | None) -> dict:
