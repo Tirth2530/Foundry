@@ -1,0 +1,121 @@
+{
+ "id": "d16_payment_ledger",
+ "title": "Payment ledger: idempotent recording and one-time refunds",
+ "tags": [
+  "payment-state",
+  "idempotency",
+  "card-selection"
+ ],
+ "request": "Build an agent that records payments per user. 'pay <id> <amount>' records the payment and replies 'Recorded <id>: $<amount>' with the amount shown with 2 decimals; sending 'pay' again with an id that user already recorded must not record it twice and replies 'Duplicate <id> ignored'. 'balance' replies 'Balance: $<total>' (2 decimals) over that user's recorded, non-refunded payments. The selection {\"action\":\"refund\",\"id\":\"X\"} refunds a recorded payment once and replies 'Refunded X'; refunding it again replies 'Already refunded X'; an id the user never recorded replies 'Unknown payment X'.",
+ "tests": [
+  {
+   "name": "record_dedupe_balance",
+   "turns": [
+    {
+     "send": "pay p1 10",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "Recorded p1: $10.00"
+      }
+     ]
+    },
+    {
+     "send": "pay p1 10",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Duplicate p1 ignored"
+      }
+     ]
+    },
+    {
+     "send": "pay p2 2.5",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Recorded p2: $2.50"
+      }
+     ]
+    },
+    {
+     "send": "balance",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Balance: $12.50"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "refund_once",
+   "turns": [
+    {
+     "send": "pay r1 7",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "Recorded r1: $7.00"
+      }
+     ]
+    },
+    {
+     "send": "{\"action\": \"refund\", \"id\": \"r1\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Refunded r1"
+      },
+      {
+       "type": "text_not_contains",
+       "value": "Already"
+      }
+     ]
+    },
+    {
+     "send": "{\"action\": \"refund\", \"id\": \"r1\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Already refunded r1"
+      }
+     ]
+    },
+    {
+     "send": "balance",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Balance: $0.00"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "unknown_refund",
+   "turns": [
+    {
+     "send": "{\"action\": \"refund\", \"id\": \"zz\"}",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "Unknown payment zz"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

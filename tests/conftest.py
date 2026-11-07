@@ -33,6 +33,13 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(examiner, "CACHE", runs / "_cache")
     monkeypatch.setattr(judge, "SEALED_LOG", ev / "sealed")
     monkeypatch.setattr(pipeline, "TRANSPORT", None)
+    # The runner is SCRIPTED in these tests (no generated code executes), so the sealed-set Docker requirement is
+    # overridden explicitly; the override itself is logged to the ledger like any real override would be.
+    monkeypatch.setenv("FOUNDRY_SANDBOX", "process")
+    monkeypatch.setenv("FOUNDRY_ALLOW_PROCESS_SANDBOX_FOR_SEALED", "offline test: scripted runner, no generated code")
+    from foundry import usage
+    monkeypatch.setattr(usage, "PATH", ev / "usage.db")
+    llm.reset_process_budgets()
     for p in config.PROVIDERS.values():
         monkeypatch.setitem(p, "api_key", "test")
 
@@ -75,9 +82,10 @@ def sandbox(tmp_path, monkeypatch):
             text = "OK"
         rec = {"role": role, "provider": provider, "model": "fake", "fell_back": False,
                "tokens_in": 1000, "tokens_out": 500, "usd": 0.01, "t": 0}
-        if meter:
-            meter.check()
-            meter.add(rec)
+        if meter:  # same atomic reserve -> settle protocol as llm.chat (scripted cost: $0.01 per call)
+            res = meter.reserve(0.01)
+            meter.settle(res, 0.01)
+            meter.calls.append(rec)
         return {"text": text, **rec}
 
     def fake_run(agents, entry, cases, **kw):

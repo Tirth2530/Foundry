@@ -63,7 +63,12 @@ IMAGE = config.env("FOUNDRY_SANDBOX_IMAGE", "foundry-sandbox:1")
 
 
 class InfrastructureError(RuntimeError):
-    """The environment is broken (Docker down, image missing). Never a lesson for evolution."""
+    """The environment is broken (Docker down, image missing, sandbox not configured). Never a lesson for
+    evolution, never charged to a skill version."""
+
+
+class SandboxNotConfigured(InfrastructureError):
+    pass
 
 
 def docker_status() -> str:
@@ -80,18 +85,25 @@ def docker_status() -> str:
 
 
 def sandbox_mode() -> str:
-    want = config.env("FOUNDRY_SANDBOX", "process")
+    """Untrusted generated code never runs under an IMPLICIT isolation choice. FOUNDRY_SANDBOX must say which:
+      process  isolated child process: `python -I`, EMPTY environment (no API keys), rlimits, temp dir, plus the
+               static gate that forbids files/env/os/sys/subprocess/eval. The default in .env.example.
+      docker   the hardened container (no network, read-only, cap-drop ALL, non-root); bench folder not mounted.
+    There is no silent fallback from docker to process."""
+    want = config.env("FOUNDRY_SANDBOX")
+    if want not in ("docker", "process"):
+        raise SandboxNotConfigured(
+            f"FOUNDRY_SANDBOX is {want!r}: add `FOUNDRY_SANDBOX=process` to .env (or 'docker' after "
+            "`python -m foundry sandbox-build`) before executing generated code")
     if want == "process":
         return "process"
     st = docker_status()
-    if st == "ok":
-        return "docker"
-    if want == "docker":
-        msg = {"no-docker": "Docker is not installed",
+    if st != "ok":
+        msg = {"no-docker": "Docker is not installed (install it, then `python -m foundry sandbox-build`)",
                "daemon-down": "Docker Desktop is not running: open it (`open -a Docker`) and wait for 'Engine running'",
                "no-image": f"sandbox image {IMAGE} is missing: run `python -m foundry sandbox-build`"}[st]
-        raise InfrastructureError(f"SANDBOX UNAVAILABLE: {msg}")
-    return "process"
+        raise SandboxNotConfigured(f"SANDBOX UNAVAILABLE: FOUNDRY_SANDBOX=docker but {msg}")
+    return "docker"
 
 
 def _command(mode: str, job_path: str, work: str, hard: float) -> list[str]:

@@ -1,0 +1,149 @@
+{
+ "id": "p10_finding_relay_multi",
+ "title": "Investigate, independently verify, approve, publish exactly once",
+ "tags": [
+  "multi-agent",
+  "independent-verification",
+  "approval",
+  "idempotency",
+  "card-selection"
+ ],
+ "request": "Build THREE agents. 'verifier' checks a claim of the form '<a>+<b>=<c>' with integers and answers CONFIRMED if a+b equals c, otherwise REJECTED. 'publisher' publishes findings PER USER (the entry agent tells it which user): it numbers that user's posts P-1, P-2, ... and publishing a finding it already published returns the existing post number instead of creating a new post. 'investigator' is the entry agent: for 'check <claim>' it asks verifier; if CONFIRMED it replies 'Confirmed F-<n>: <claim>' (that user's confirmed findings are numbered F-1, F-2, ...) with a review card titled 'Publish F-<n>?' whose Approve button has selection {\"action\":\"publish\",\"finding\":\"F-<n>\"} and whose Reject button has selection {\"action\":\"discard\",\"finding\":\"F-<n>\"}; if REJECTED it replies 'Not reproduced: <claim>' with no card. On publish it asks publisher and replies 'Published F-<n> as P-<m>' (a repeated publish of the same finding gives the same P-<m>); for a finding the user does not have it replies 'Unknown finding F-<n>'. On discard it replies 'Discarded F-<n>'.",
+ "topology": {
+  "agents": [
+   "investigator",
+   "verifier",
+   "publisher"
+  ],
+  "must_receive": [
+   "verifier",
+   "publisher"
+  ]
+ },
+ "tests": [
+  {
+   "name": "confirm_publish_retry",
+   "turns": [
+    {
+     "send": "check 2+3=5",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "Confirmed F-1: 2+3=5"
+      },
+      {
+       "type": "card",
+       "kind": "review"
+      }
+     ]
+    },
+    {
+     "send": "{\"action\": \"publish\", \"finding\": \"F-1\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Published F-1 as P-1"
+      }
+     ]
+    },
+    {
+     "send": "{\"action\": \"publish\", \"finding\": \"F-1\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Published F-1 as P-1"
+      },
+      {
+       "type": "text_not_contains",
+       "value": "P-2"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "rejected_claim",
+   "turns": [
+    {
+     "send": "check 2+2=5",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "Not reproduced: 2+2=5"
+      },
+      {
+       "type": "no_card"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "unknown_finding",
+   "turns": [
+    {
+     "send": "{\"action\": \"publish\", \"finding\": \"F-7\"}",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "Unknown finding F-7"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "second_finding",
+   "turns": [
+    {
+     "send": "check 1+1=2",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "Confirmed F-1: 1+1=2"
+      }
+     ]
+    },
+    {
+     "send": "check 10+5=15",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Confirmed F-2: 10+5=15"
+      }
+     ]
+    },
+    {
+     "send": "{\"action\": \"publish\", \"finding\": \"F-2\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Published F-2 as P-1"
+      }
+     ]
+    },
+    {
+     "send": "{\"action\": \"discard\", \"finding\": \"F-1\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Discarded F-1"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

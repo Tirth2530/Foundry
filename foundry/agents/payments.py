@@ -29,6 +29,7 @@ def create_checkout(amount_usd: float, job_id: str, user: str, description: str)
                                                                          "description": description[:200]},
                                     "unit_amount": cents}, "quantity": 1}],
         metadata={"job_id": job_id, "user_address": user},
+        idempotency_key=f"foundry-checkout-{job_id}-{cents}",  # a retried approve never creates a 2nd session
     )
     return {"client_secret": session.client_secret, "id": session.id, "checkout_session_id": session.id,
             "publishable_key": config.STRIPE_PUBLISHABLE_KEY, "currency": "usd", "amount_cents": cents,

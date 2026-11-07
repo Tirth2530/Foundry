@@ -44,9 +44,38 @@ def _emit(payload: dict) -> None:
         os._exit(0)
 
 
+MAX_TRAFFIC = 2000  # bound the evidence a misbehaving system can produce
+
+import contextvars
+
+# Real uAgents layers these calls: ExternalContext.send -> super().send (InternalContext.send), and
+# Agent.on_message -> self._protocol.on_message. Both layers are patched, so without these guards one message
+# would be recorded twice. Each message is recorded exactly once, at the outermost layer.
+_IN_SEND = contextvars.ContextVar("foundry_in_send", default=False)
+
+
+def correlation_id(message) -> str:
+    """Stable id for one message, computed identically on the send and the receive side, so a send can be
+    matched to the handler run that processed it. ACP messages carry msg_id; custom models are hashed."""
+    for attr in ("msg_id", "acknowledged_msg_id", "rid"):
+        v = getattr(message, attr, None)
+        if v:
+            return f"{attr}:{v}"
+    try:
+        body = message.model_dump_json() if hasattr(message, "model_dump_json") else message.json()
+    except Exception:  # noqa: BLE001
+        body = repr(message)
+    import hashlib
+    return "sha:" + hashlib.sha256(f"{type(message).__name__}|{body}".encode()).hexdigest()[:16]
+
+
+def _ctx_address(ctx) -> str:
+    agent = getattr(ctx, "agent", None)
+    return str(getattr(agent, "address", None) or getattr(ctx, "address", None))
+
+
 def _install_traffic_tap(traffic: list) -> bool:
-    """Record every ctx.send (sender address, destination, message type) so the parent can verify that a
-    multi-agent system really collaborates, instead of trusting the generated architecture."""
+    """SEND side: record every ctx.send (sender, destination, type, correlation id, time, delivery result)."""
     try:
         import uagents.context as uc
     except Exception:  # noqa: BLE001
@@ -59,14 +88,80 @@ def _install_traffic_tap(traffic: list) -> bool:
 
         def wrap(orig):
             async def send(self, destination, message, *a, **kw):
+                if _IN_SEND.get():  # inner layer of a send already being recorded
+                    return await orig(self, destination, message, *a, **kw)
+                token = _IN_SEND.set(True)
+                try:
+                    return await _recorded(self, destination, message, *a, **kw)
+                finally:
+                    _IN_SEND.reset(token)
+
+            async def _recorded(self, destination, message, *a, **kw):
+                rec = None
                 try:
                     me = getattr(getattr(self, "agent", None), "address", None) or getattr(self, "address", None)
-                    traffic.append({"from": str(me), "to": str(destination), "type": type(message).__name__})
+                    rec = {"from": str(me), "to": str(destination), "type": type(message).__name__,
+                           "corr": correlation_id(message), "t": time.time()}
+                    if len(traffic) < MAX_TRAFFIC:
+                        traffic.append(rec)
                 except Exception:  # noqa: BLE001
                     pass
-                return await orig(self, destination, message, *a, **kw)
+                try:
+                    out = await orig(self, destination, message, *a, **kw)
+                except BaseException as e:
+                    if rec is not None:
+                        rec["send_error"] = f"{type(e).__name__}: {str(e)[:120]}"
+                    raise
+                if rec is not None:
+                    status = getattr(out, "status", None)
+                    rec["delivery"] = str(getattr(status, "value", status)) if status is not None else None
+                return out
             return send
         setattr(obj, "send", wrap(fn))
+        patched = True
+    return patched
+
+
+def install_receive_tap(classes, received: list) -> bool:
+    """RECEIVE side: wrap the on_message decorators of uagents Protocol/Agent BEFORE generated code runs, so
+    every handler records (recipient, sender, type, correlation id, time, ok/exception) when it actually
+    PROCESSES a message. A send alone is not proof of collaboration; a handler that ran is."""
+    import functools
+    patched = False
+    for cls in classes:
+        orig = getattr(cls, "on_message", None)
+        if orig is None or getattr(orig, "_foundry_tapped", False):
+            continue
+
+        def make(orig):
+            def on_message(self, model, *a, **kw):
+                deco = orig(self, model, *a, **kw)
+
+                def register(fn):
+                    if getattr(fn, "_foundry_receive_tapped", False):  # Agent layer already wrapped it
+                        return deco(fn)
+
+                    @functools.wraps(fn)
+                    async def handler(ctx, sender, msg, *ha, **hkw):
+                        rec = {"to": _ctx_address(ctx), "from": str(sender), "type": type(msg).__name__,
+                               "corr": correlation_id(msg), "t": time.time()}
+                        try:
+                            result = await fn(ctx, sender, msg, *ha, **hkw)
+                            rec["ok"] = True
+                            return result
+                        except BaseException as e:
+                            rec["ok"] = False
+                            rec["error"] = f"{type(e).__name__}: {str(e)[:160]}"
+                            raise
+                        finally:
+                            if len(received) < MAX_TRAFFIC:
+                                received.append(rec)
+                    handler._foundry_receive_tapped = True
+                    return deco(handler)
+                return register
+            on_message._foundry_tapped = True
+            return on_message
+        setattr(cls, "on_message", make(orig))
         patched = True
     return patched
 
@@ -83,7 +178,10 @@ def main(job_path: str) -> None:
     )
 
     traffic: list = []
+    received: list = []
     tap = _install_traffic_tap(traffic)
+    rtap = install_receive_tap([Protocol, Agent], received)
+    t_start = time.time()
     nonce = uuid.uuid4().hex[:8]
     bureau = Bureau(port=_free_port())
     agents = {a["name"]: Agent(name=f"gen-{a['name']}", seed=f"foundry-gen-{nonce}-{a['name']}")
@@ -100,19 +198,38 @@ def main(job_path: str) -> None:
         bureau.add(agents[spec["name"]])
 
     entry = job.get("entry") or job["agents"][0]["name"]
-    base = {"peers": peers, "entry": entry, "load_errors": load_errors, "traffic_tap": tap}
+    try:
+        from importlib.metadata import version as _v
+        uv = _v("uagents")
+    except Exception:  # noqa: BLE001
+        uv = None
+    base = {"peers": peers, "entry": entry, "load_errors": load_errors, "traffic_tap": tap,
+            "receive_tap": rtap, "t0": t_start, "uagents_version": uv, "python": sys.version.split()[0]}
+    windows: list = [None] * len(cases)
+    inv = {v: k for k, v in peers.items()}
+
+    def _name(addr):
+        return inv.get(addr, "client")
 
     def named_traffic():
-        inv = {v: k for k, v in peers.items()}
+        """Deduplicated edges (for humans) - the full records are in traffic_log / received_log."""
         seen, out = set(), []
         for t in traffic:
-            key = (inv.get(t["from"], "client"), inv.get(t["to"], "client"), t["type"])
+            key = (_name(t["from"]), _name(t["to"]), t["type"])
             if key not in seen:
                 seen.add(key)
                 out.append({"from": key[0], "to": key[1], "type": key[2]})
         return out
+
+    def logs():
+        sent = [{**t, "from": _name(t["from"]), "to": _name(t["to"]), "t": round(t["t"] - t_start, 3)}
+                for t in traffic]
+        recv = [{**r, "from": _name(r["from"]), "to": _name(r["to"]), "t": round(r["t"] - t_start, 3)}
+                for r in received]
+        wins = [None if w is None else [round(w[0] - t_start, 3), round(w[1] - t_start, 3)] for w in windows]
+        return {"traffic": named_traffic(), "traffic_log": sent, "received_log": recv, "case_windows": wins}
     if entry in load_errors or not cases:
-        _emit({**base, "cases": [], "traffic": named_traffic()})
+        _emit({**base, "cases": [], **logs()})
 
     results: list = [None] * len(cases)
     states: list = []
@@ -122,7 +239,7 @@ def main(job_path: str) -> None:
             for st, r in zip(states, results):
                 for t in r["turns"]:
                     t["acked"] = t.get("msg_id") in st["acks"]
-            _emit({**base, "cases": results, "traffic": named_traffic()})
+            _emit({**base, "cases": results, **logs()})
 
     def serialize(msg) -> dict:
         texts, mds, end = [], [], False
@@ -139,6 +256,7 @@ def main(job_path: str) -> None:
     async def run_case(ctx, i: int, case: dict, st: dict):
         await asyncio.sleep(1.5 + 0.05 * i)
         turns = []
+        case_t0 = time.time()
         for turn in case["turns"]:
             start = len(st["msgs"])
             mid = uuid4()
@@ -160,6 +278,7 @@ def main(job_path: str) -> None:
                 "replies": [serialize(m) for _, m in st["msgs"][start:]],
                 "latency_ms": int((first - t0) * 1000) if first else None,
             })
+        windows[i] = (case_t0, time.time())
         results[i] = {"name": case.get("name", f"case{i}"), "turns": turns}
         finish_if_done()
 
@@ -193,7 +312,7 @@ def main(job_path: str) -> None:
         time.sleep(hard_limit)
         partial = [r or {"name": c.get("name"), "turns": [], "error": "case did not finish"}
                    for r, c in zip(results, cases)]
-        _emit({**base, "cases": partial, "watchdog": True, "traffic": named_traffic()})
+        _emit({**base, "cases": partial, "watchdog": True, **logs()})
 
     threading.Thread(target=watchdog, daemon=True).start()
     bureau.run()

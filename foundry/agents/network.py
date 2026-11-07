@@ -73,17 +73,34 @@ REGISTRY = {
 TIMEOUTS = {"scout": 900, "runner": 900, "builder": 400, "publisher": 1200, "judge": 7200, "evolver": 14400}
 
 
+class Unauthorized(PermissionError):
+    pass
+
+
+def _safe_skills_path(path: str) -> Path:
+    """Role agents only ever load skill versions from FOUNDRY's own skill store (candidates included)."""
+    p = Path(path).resolve()
+    roots = [sk.VERSIONS.resolve(), sk.CANDIDATES.resolve()]
+    if not any(r in p.parents for r in roots):
+        raise Unauthorized(f"skills_path {path!r} is outside the skill store")
+    return p
+
+
 def execute(task: dict) -> dict:
     """Run one role op (in a worker thread inside the role agent)."""
     t0 = time.time()
     role, op = task["role"], task["op"]
+    if op not in REGISTRY.get(role, {}):
+        return {"ok": False, "error": f"unknown op {role}.{op}", "calls": [], "events": []}
     fn, needs_ctx = REGISTRY[role][op]
-    meter = llm.CostMeter(cap_usd=task.get("cap_remaining"))
+    # detached: the requesting job already reserved this allowance in its own budget chain and commits the
+    # returned calls itself, so counting them here too would double-charge the project ceiling
+    meter = llm.new_meter(task.get("cap_remaining"), name=f"{role} grant", detached=True)
     events: list = []
     try:
         kw = dict(task.get("kwargs") or {})
         if needs_ctx:
-            kw.update(skills=sk.load(task["skills_version"], path=Path(task["skills_path"])),
+            kw.update(skills=sk.load(task["skills_version"], path=_safe_skills_path(task["skills_path"])),
                       meter=meter, events=events)
         result = fn(**kw)
         return {"ok": True, "result": result, "calls": meter.calls, "events": events, "ms": int(1000 * (time.time() - t0))}
@@ -93,11 +110,29 @@ def execute(task: dict) -> dict:
         return {"ok": False, "error": f"{type(e).__name__}: {e}", "calls": meter.calls, "events": events}
 
 
-def make_role_agent(role: str) -> Agent:
+# Roles whose operations change the world or FOUNDRY itself. Every role is allowlisted; these are listed so
+# denials are visible in the evidence ledger with their consequence.
+SENSITIVE = {"publisher": "deploys to Agentverse", "evolver": "changes FOUNDRY's skills",
+             "judge": "opens the sealed promotion set", "runner": "executes generated code",
+             "ledger": "writes evidence", "miner": "spends model budget", "builder": "spends model budget"}
+
+
+def make_role_agent(role: str, allowed: set | None = None) -> Agent:
+    """A role agent only accepts RoleTask messages from `allowed` addresses (the Foreman). The sender address of
+    a uAgents message is authenticated by the envelope signature, so an allowlist of addresses is an identity
+    check, not a name check. Anything else is refused, logged, and never executed."""
     a = Agent(name=f"foundry-{role}", seed=f"{config.FOREMAN_SEED}-role-{role}")
+    allowed = set(allowed or ())
 
     @a.on_message(RoleTask, replies=RoleResult)
     async def handle(ctx: Context, sender: str, msg: RoleTask):
+        if sender not in allowed or msg.role != role:
+            why = "caller not authorized" if sender not in allowed else f"task addressed to role {msg.role!r}"
+            ledger.append("auth_denied", role=role, sender=sender, rid=msg.rid, reason=why,
+                          consequence=SENSITIVE.get(role))
+            await ctx.send(sender, RoleResult(rid=msg.rid, role=role, ok=False,
+                                              payload=json.dumps({"error": f"unauthorized: {why}"})))
+            return
         task = json.loads(msg.payload)
         task["role"] = role
         res = await asyncio.to_thread(execute, task)
@@ -117,12 +152,22 @@ class Transport:
         self.ctx: Context | None = None
         self.pending: dict = {}
 
+        self.rejected: list = []
+
         @sender_agent.on_message(RoleResult)
         async def on_result(ctx: Context, sender: str, msg: RoleResult):
+            # A result is accepted only for an outstanding request id (correlation), from the exact agent that
+            # request was sent to, claiming the right role. Anything else is dropped and logged.
             slot = self.pending.get(msg.rid)
-            if slot:
-                slot["res"] = {"ok": msg.ok, **json.loads(msg.payload)}
-                slot["event"].set()
+            if not slot or sender != slot["expect"] or msg.role != slot["role"] or slot["event"].is_set():
+                why = "unknown or completed request id" if not slot else (
+                    "unexpected sender" if sender != slot["expect"] else "wrong role" if msg.role != slot["role"]
+                    else "duplicate result")
+                self.rejected.append({"rid": msg.rid, "sender": sender, "why": why})
+                ledger.append("role_result_rejected", rid=msg.rid, sender=sender, role=msg.role, reason=why)
+                return
+            slot["res"] = {"ok": msg.ok, **json.loads(msg.payload)}
+            slot["event"].set()
 
         @sender_agent.on_event("startup")
         async def remember(ctx: Context):
@@ -131,7 +176,7 @@ class Transport:
 
     def _once(self, role: str, payload: dict) -> dict:
         rid = uuid.uuid4().hex
-        slot = {"event": threading.Event(), "res": None}
+        slot = {"event": threading.Event(), "res": None, "expect": self.addr[role], "role": role}
         self.pending[rid] = slot
         msg = RoleTask(rid=rid, role=role, payload=json.dumps(payload, default=str))
         asyncio.run_coroutine_threadsafe(self.ctx.send(self.addr[role], msg), self.loop)
@@ -157,8 +202,8 @@ class Transport:
             time.sleep(d.get("delay_s", 2))
 
 
-def build_roles() -> dict:
-    return {role: make_role_agent(role) for role in REGISTRY}
+def build_roles(foreman_address: str) -> dict:
+    return {role: make_role_agent(role, {foreman_address}) for role in REGISTRY}
 
 
 def install(foreman: Agent, roles: dict) -> Transport:

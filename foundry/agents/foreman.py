@@ -25,7 +25,7 @@ from uagents_core.contrib.protocols.payment import (
     CommitPayment, CompletePayment, Funds, RejectPayment, RequestPayment, payment_protocol_spec,
 )
 
-from .. import cards, config, ledger, llm, pipeline, skills as sk
+from .. import cards, config, contract as contract_mod, jobs as jobs_mod, ledger, llm, pipeline, skills as sk
 from ..roles import livecheck, publisher, quartermaster, scout
 from . import payments
 
@@ -75,6 +75,7 @@ class Foreman:
         self.loop = None
         self.ctx = None
         self.evolving = threading.Lock()
+        self.cancels: dict = {}  # job_id -> threading.Event checked before every paid stage / model call
         self._load_jobs()
 
         chat_proto = Protocol(spec=chat_protocol_spec)
@@ -114,8 +115,8 @@ class Foreman:
 
         @pay_proto.on_message(RejectPayment)
         async def _on_reject(ctx: Context, sender: str, msg: RejectPayment):
-            for j in self.jobs.values():
-                if j.get("sender") == sender and j["status"] == "awaiting_payment":
+            for j in self.jobs.values():  # only the rejecting user's own unpaid jobs
+                if j.get("sender") == sender and j["status"] == "awaiting_payment" and not j.get("paid"):
                     self._update(j, status="cancelled")
             await ctx.send(sender, chat("Payment declined, so nothing will be built. Send a new request any time."))
 
@@ -138,8 +139,17 @@ class Foreman:
                 self.jobs[j["job_id"]] = j
             except (ValueError, KeyError):
                 continue
+        for j in self.jobs.values():  # a paid tx survives restarts, so a replayed CommitPayment is idempotent
+            if j.get("paid_tx"):
+                self.paid_tx.add(j["paid_tx"])
+        try:
+            self.recovered = jobs_mod.recover(self.jobs, lambda job, **kw: self._update(job, **kw))
+        except Exception as e:  # noqa: BLE001 - recovery problems must not stop the agent from answering
+            self.recovered = [{"error": f"{type(e).__name__}: {e}"}]
 
     def _update(self, job: dict, **kw):
+        if "status" in kw:  # every status change is checked against the lifecycle table
+            jobs_mod.check_transition(job.get("status"), kw["status"])
         job.update(kw)
         d = config.RUNS / job["job_id"]
         d.mkdir(parents=True, exist_ok=True)
@@ -163,8 +173,10 @@ class Foreman:
         if action == "submit_request":
             req = str(sel.get("request", "")).strip()
             budget = sel.get("budget")
-            return await self.quote(ctx, sender, req, budget)
-        job_actions = ("approve_quote", "reject_quote", "publish", "evidence", "reuse", "build_new", "learn")
+            agents = [a.strip() for a in str(sel.get("agents") or "").split(",") if a.strip()]
+            return await self.quote(ctx, sender, req, budget, agents=agents or None)
+        job_actions = ("approve_quote", "reject_quote", "publish", "evidence", "reuse", "build_new", "learn",
+                       "recheck", "cancel", "passport", "permissions", "reject_publication")
         if action in job_actions and jid not in self.jobs:
             return await ctx.send(sender, chat(f"I couldn't find job {jid}. Say 'status' to see your jobs."))
         # AUTHORIZATION: a job can only be approved, paid, published, inspected or learned from by the
@@ -187,7 +199,14 @@ class Foreman:
             "reuse": lambda: self.reuse(ctx, sender, self.jobs[jid], (sel or {}).get("pick")),
             "build_new": lambda: self.build_new(ctx, sender, self.jobs[jid]),
             "reject_quote": lambda: self.reject(ctx, sender, self.jobs[jid]),
+            "cancel": lambda: self.cancel(ctx, sender, self.jobs[jid]),
             "publish": lambda: self.publish(ctx, sender, self.jobs[jid]),
+            "recheck": lambda: self.recheck(ctx, sender, self.jobs[jid]),
+            "passport": lambda: self.passport(ctx, sender, self.jobs[jid]),
+            "permissions": lambda: self.permissions(ctx, sender, self.jobs[jid]),
+            "reject_publication": lambda: self.reject_publication(ctx, sender, self.jobs[jid]),
+            "compare": lambda: self.compare(ctx, sender, str((sel or {}).get("a", "v0000")),
+                                            str((sel or {}).get("b", sk.current_version()))),
             "evidence": lambda: self.evidence(ctx, sender, self.jobs[jid]),
             "learn": lambda: self.learn(ctx, sender, self.jobs[jid]),
             "scoreboard": lambda: self.scoreboard(ctx, sender),
@@ -214,12 +233,20 @@ class Foreman:
         m = JOB_RE.search(low)
         jid = m.group(0) if m else None
         if jid:
-            if any(w in low for w in ("reject", "cancel", "decline")):
+            if "cancel" in low or "stop" in low:
+                return "cancel", jid
+            if any(w in low for w in ("reject", "decline")):
                 return "reject_quote", jid
             if "use this agent" in low or "reuse" in low or "use existing" in low:
                 return "reuse", jid
             if "build a new" in low or "build new" in low:
                 return "build_new", jid
+            if "passport" in low:
+                return "passport", jid
+            if "permission" in low:
+                return "permissions", jid
+            if "recheck" in low or "re-check" in low:
+                return "recheck", jid
             if "publish" in low or "deploy" in low:
                 return "publish", jid
             if "learn" in low or "teach" in low:
@@ -254,6 +281,8 @@ class Foreman:
         md = cards.form("What should FOUNDRY build?", [
             {"name": "request", "kind": "text", "label": "Describe the agent or multi-agent system", "required": True},
             {"name": "budget", "kind": "number", "label": "Spend cap in USD (optional)"},
+            {"name": "agents", "kind": "text", "label": "Required agent names, comma-separated (optional: makes it "
+                                                         "a multi-agent contract)"},
         ], "Get a verified quote", {"action": "submit_request"})
         await ctx.send(sender, chat(
             "I'm FOUNDRY. I build Fetch.ai agents and multi-agent systems, prove they work with tests written by "
@@ -261,20 +290,24 @@ class Foreman:
             f"engineering process from every failure. I'm on skill version {v.version}. Say 'history' to see what "
             "I've learned, or describe what you need.", md))
 
-    async def quote(self, ctx, sender, request, budget, intro=None):
+    async def quote(self, ctx, sender, request, budget, intro=None, agents=None):
         if len(request) < 15:
             return await self.welcome(ctx, sender)
+        try:  # the user's topology contract is fixed and validated before anything is built or priced
+            contract_mod.derive(request, explicit_agents=agents)
+        except contract_mod.ContractError as e:
+            return await ctx.send(sender, chat(f"I can't use those agent names: {e}. Please resend the request."))
         v = sk.load()
         if not (scout.catalog() or config.AGENTVERSE_API_KEY):
-            _, msg = await asyncio.to_thread(self._make_quote, sender, request, budget, v, None)
+            _, msg = await asyncio.to_thread(self._make_quote, sender, request, budget, v, None, None, agents)
             return await ctx.send(sender, msg)
         await ctx.send(sender, chat(intro or (
             "Before building anything, my Scout is searching Agentverse and my verified catalog for an agent that "
             "already does this, then re-testing the best matches live. Nothing is reused on the strength of a "
             "README or a search ranking.")))
-        threading.Thread(target=self._scout_worker, args=(sender, request, budget, v), daemon=True).start()
+        threading.Thread(target=self._scout_worker, args=(sender, request, budget, v, agents), daemon=True).start()
 
-    def _make_quote(self, sender, request, budget, v, note, job=None):
+    def _make_quote(self, sender, request, budget, v, note, job=None, agents=None):
         """Create (or refresh) a job with a Quartermaster quote. Returns (job, ChatMessage)."""
         q = pipeline.rpc("quartermaster", "quote", lambda request, version: quartermaster.quote(request, sk.load(version)),
                          request=request, version=v.version)
@@ -288,24 +321,56 @@ class Foreman:
             job = {"job_id": pipeline.new_job_id(), "sender": sender, "request": request, "created": time.time()}
             self.jobs[job["job_id"]] = job
         jid = job["job_id"]
-        self._update(job, quote=q, status="quoted", skills_version=v.version)
+        agents = agents if agents is not None else job.get("contract_agents")
+        contract = contract_mod.derive(request, explicit_agents=agents)
+        self._update(job, quote=q, status="quoted", skills_version=v.version, contract=contract,
+                     contract_agents=agents)
         pay = "Stripe test checkout" if payments.enabled() else "demo mode (no charge)"
-        md = cards.review(f"Build quote · {jid}", [
-            ("Request", request[:160] + ("…" if len(request) > 160 else "")),
-            ("Estimated model cost", f"${q['estimate_usd']:.3f} ({q['basis']})"),
-            ("Hard spend cap", f"${q['cap_usd']:.2f}: work stops if reached"),
+        scout_res = job.get("scout") or {}
+        n_checked = len(scout_res.get("audits") or [])
+        md = cards.review(f"Capability proposal · {jid}", [
+            ("You want", request[:160] + ("…" if len(request) > 160 else "")),
+            ("Existing agents", f"{n_checked} candidate(s) live-tested, none passed your test" if n_checked else
+             (note or "no matching agent found")[:160]),
+            ("Recommendation", "build new: nothing existing passed a live test of your request" if n_checked else
+             "build new"),
+            ("Required architecture (your contract)", contract_mod.describe(contract)),
+            ("Proposed architecture", "designed by the Architect after approval; it is a proposal (INFERRED). "
+                                      "If it conflicts with your contract, your contract is enforced"),
+            ("Estimated build cost", f"${q['estimate_usd']:.3f} model spend ({q['basis']}); hosting "
+                                     "not metered"),
+            ("Spending limit", f"${q['cap_usd']:.2f} hard cap: {q['on_exhaustion']}"),
+            ("Ongoing cost", f"${q['per_call_runtime_usd']:.2f} model cost per call ({q['per_call_note']})"),
             ("Price", f"${q['price_usd']:.2f} via {pay}"),
+            ("Permissions", "spend model budget up to the cap · run generated code in an isolated sandbox with no "
+                            "network and no credentials · deploy ONLY if you tap Publish later"),
             ("Builder / verifier", f"{v.route('builder')} builds · {v.route('examiner')} writes the tests independently"),
             ("Skill version", v.version),
-            ("Hosting & test compute", f"{q['hosting']} · {q['test_compute']}"),
-        ], ("Approve & build", {"action": "approve_quote", "job_id": jid}),
+        ], ("Approve new build", {"action": "approve_quote", "job_id": jid}),
             ("Cancel", {"action": "reject_quote", "job_id": jid}))
         lead = (note + " ") if note else ""
-        return job, chat(f"{lead}Here's my quote for {jid}. Nothing runs until you approve.", md)
+        return job, chat(f"{lead}Here's my proposal for {jid}. Nothing runs until you approve. Say "
+                         f"'permissions {jid}' to review exactly what I'm allowed to do.", md)
 
-    def _scout_worker(self, sender, request, budget, v):
+    async def permissions(self, ctx, sender, job):
+        q = job.get("quote") or {}
+        md = cards.detail(f"Permissions · {job['job_id']}", [
+            ("Model spend", f"up to ${q.get('cap_usd', 0):.2f}; every call reserves its worst case first and is "
+                            "refused if it would not fit"),
+            ("Code execution", "generated code runs only in the sandbox (FOUNDRY_SANDBOX), no network, no API keys"),
+            ("Deployment", "none unless you tap Publish; then only to FOUNDRY's Agentverse account, torn down if any "
+                           "live check fails"),
+            ("Payments", "only the quoted price, only after you commit it, verified with Stripe before work starts"
+             if payments.enabled() else "none (demo mode)"),
+            ("Credentials given to your agents", "none: deployed code receives only its peers' addresses"),
+            ("Who can act on this job", "only you (your ASI:One address)"),
+        ], [("Approve new build", {"action": "approve_quote", "job_id": job["job_id"]}, True),
+            ("Cancel", {"action": "reject_quote", "job_id": job["job_id"]}, False)])
+        await ctx.send(sender, chat("These are the only things this job can do:", md))
+
+    def _scout_worker(self, sender, request, budget, v, agents=None):
         try:
-            res = pipeline.rpc("scout", "find", scout.find, skills=v, meter=llm.CostMeter(cap_usd=0.30), events=[],
+            res = pipeline.rpc("scout", "find", scout.find, skills=v, meter=llm.new_meter(0.30, name="scout"), events=[],
                                request=request)
         except Exception as e:  # noqa: BLE001 - discovery is optional; building is always available
             res = {"found": False, "error": f"{type(e).__name__}: {e}"}
@@ -313,7 +378,8 @@ class Foreman:
         if res.get("audits") or res.get("found"):
             job = {"job_id": pipeline.new_job_id(), "sender": sender, "request": request, "created": time.time()}
             self.jobs[job["job_id"]] = job
-            self._update(job, status="reuse_offer" if res.get("found") else "scouted", scout=res, budget=budget)
+            self._update(job, status="reuse_offer" if res.get("found") else "scouted", scout=res, budget=budget,
+                         contract_agents=agents)
         if res.get("audits"):
             self.later(sender, self.audit_message(job, res))
         if res.get("found"):
@@ -331,7 +397,7 @@ class Foreman:
             ], ("Use this agent", {"action": "reuse", "job_id": job["job_id"]}),
                 ("Build a new one", {"action": "build_new", "job_id": job["job_id"]}))
             return self.later(sender, chat("Found one, and it passed a live re-check just now. Use it, or build new?", md))
-        _, msg = self._make_quote(sender, request, budget, v, self._scout_note(res), job)
+        _, msg = self._make_quote(sender, request, budget, v, self._scout_note(res), job, agents)
         self.later(sender, msg)
 
     def audit_message(self, job, res) -> ChatMessage:
@@ -408,12 +474,20 @@ class Foreman:
         await ctx.send(sender, msg)
 
     async def reject(self, ctx, sender, job):
+        if job["status"] not in ("quoted", "awaiting_payment", "scouted", "reuse_offer"):
+            return await ctx.send(sender, chat(f"{job['job_id']} is {job['status']}; there is no open quote to reject."))
         self._update(job, status="cancelled")
         await ctx.send(sender, chat(f"Cancelled {job['job_id']}. Nothing was built or charged."))
 
     async def approve(self, ctx, sender, job):
         if job["status"] != "quoted":
             return await ctx.send(sender, chat(f"{job['job_id']} is already {job['status']}."))
+        c = job.get("contract")
+        # the approval tap approves exactly the contract shown on the card: record its hash
+        self._update(job, contract_approval={"by": sender, "t": time.time(), "sha256": (c or {}).get("sha256"),
+                                             "multi_agent": bool(c)})
+        ledger.append("contract_approved", job_id=job["job_id"], by=sender, contract_sha256=(c or {}).get("sha256"),
+                      min_agents=(c or {}).get("min_agents"))
         if payments.enabled():
             co = await asyncio.to_thread(payments.create_checkout, job["quote"]["price_usd"], job["job_id"],
                                          sender, job["request"])
@@ -437,18 +511,42 @@ class Foreman:
         job = next((j for j in self.jobs.values() if j.get("checkout_id") == tx), None)
         if not job:
             return await ctx.send(sender, RejectPayment(reason="unknown checkout session"))
-        if tx in self.paid_tx:
-            return await ctx.send(sender, CompletePayment(transaction_id=tx))  # idempotent
+        if job.get("sender") != sender:  # only the job's owner can commit its payment
+            ledger.append("auth_denied", action="commit_payment", job_id=job["job_id"], sender=sender)
+            return await ctx.send(sender, RejectPayment(reason="this checkout belongs to another user"))
+        if tx in self.paid_tx or job.get("paid_tx") == tx:
+            # idempotent across retries AND restarts: never a second build, never a second completion record
+            return await ctx.send(sender, CompletePayment(transaction_id=tx))
+        if job["status"] != "awaiting_payment":
+            return await ctx.send(sender, RejectPayment(reason=f"job is {job['status']}, not awaiting payment"))
         ok, why = await asyncio.to_thread(payments.verify, tx, job["job_id"], job["expected_cents"])
         if not ok:
+            ledger.append("payment_verification_failed", job_id=job["job_id"], tx=tx, reason=why)
             return await ctx.send(sender, RejectPayment(reason=why))
         self.paid_tx.add(tx)
-        ledger.append("payment_completed", job_id=job["job_id"], tx=tx)
+        self._update(job, paid=True, paid_tx=tx)  # persisted BEFORE anything else happens
+        ledger.append("payment_completed", job_id=job["job_id"], tx=tx, verified_with="stripe")
         await ctx.send(sender, CompletePayment(transaction_id=tx))
-        self._update(job, status="quoted", paid=True)
+        self._update(job, status="quoted")
         await self.start_build(ctx, sender, job)
 
+    async def cancel(self, ctx, sender, job):
+        st = job["status"]
+        if st in ("building",):
+            self.cancels.setdefault(job["job_id"], threading.Event()).set()
+            self._update(job, status="cancelling", cancel_requested=time.time())
+            ledger.append("cancel_requested", job_id=job["job_id"], by=sender)
+            return await ctx.send(sender, chat(f"Cancelling {job['job_id']}: no further model call will be made. "
+                                               "I'll confirm when the running stage has stopped."))
+        if st in ("quoted", "awaiting_payment", "reuse_offer", "scouted"):
+            return await self.reject(ctx, sender, job)
+        await ctx.send(sender, chat(f"{job['job_id']} is {st}; there is nothing running to cancel."))
+
     async def start_build(self, ctx, sender, job):
+        from .. import trace as trace_mod
+        trace_mod.Tracer(job["job_id"]).event("asi1_intent", user=sender, channel="ASI:One / ACP",
+                                              approved_cap_usd=job["quote"]["cap_usd"], paid=bool(job.get("paid")))
+        self.cancels[job["job_id"]] = threading.Event()
         self._update(job, status="building", started=time.time())
         await ctx.send(sender, chat(f"Approved. Building {job['job_id']} now. I'll post progress here."))
         threading.Thread(target=self._build_worker, args=(job,), daemon=True).start()
@@ -468,13 +566,21 @@ class Foreman:
             elif stage == "repair":
                 self.later(sender, chat(f"Attempt {info['attempt']} failed verification, so the Builder is "
                                         f"repairing it. First failure: {info['why'][:220]}"))
+        c, appr = job.get("contract"), job.get("contract_approval") or {}
+        if (c or {}).get("sha256") != appr.get("sha256"):
+            self._update(job, status="error", error="contract differs from the one you approved")
+            return self.later(sender, chat(f"{jid}: the topology contract differs from the one you approved, so I "
+                                           "stopped before building. Nothing was spent."))
         try:
             res = pipeline.build(job["request"], sk.load(job.get("skills_version")),
-                                 budget_usd=job["quote"]["cap_usd"], job_id=jid, progress=progress)
+                                 budget_usd=job["quote"]["cap_usd"], job_id=jid, progress=progress,
+                                 cancel=self.cancels.get(jid), contract=c)
         except Exception as e:  # noqa: BLE001
             self._update(job, status="error", error=str(e))
             return self.later(sender, chat(f"{jid} hit an unrecoverable error: {e}. Evidence is in runs/{jid}/."))
-        recon = quartermaster.reconcile(job["quote"], res["cost"]["total_usd"])
+        recon = quartermaster.reconcile(job["quote"], res["cost"]["total_usd"], res["cost"])
+        if res["status"] == "cancelled":
+            ledger.append("cancel_completed", job_id=jid, spent_usd=res["cost"]["total_usd"])
         self._update(job, status=res["status"], verify=res.get("verify"), reconcile=recon,
                      agents=(res.get("artifact") or {}).get("agents"), error=res.get("error"))
         self.later(sender, self.result_message(job, res, recon))
@@ -485,8 +591,8 @@ class Foreman:
         ex = res.get("examiner") or {}
         attempts = res.get("attempts", [])
         ctas = [("Show evidence", {"action": "evidence", "job_id": job["job_id"]}, not ok)]
-        if ok:
-            ctas.insert(0, ("Publish to Agentverse", {"action": "publish", "job_id": job["job_id"]}, True))
+        if (config.RUNS / job["job_id"] / "passport.json").exists():
+            ctas.insert(0, ("Proof Passport", {"action": "passport", "job_id": job["job_id"]}, ok))
         if any(not a.get("skipped_run") and (a.get("verify") or {}).get("passed", 0) < (a.get("verify") or {}).get("cases", 0)
                or a.get("static") for a in attempts):
             ctas.append(("Teach FOUNDRY from this build", {"action": "learn", "job_id": job["job_id"]}, False))
@@ -536,8 +642,10 @@ class Foreman:
             return await ctx.send(sender, chat(f"{job['job_id']} is {job['status']}. I only publish verified builds."))
         if not config.AGENTVERSE_API_KEY:
             return await ctx.send(sender, chat("Publishing needs AGENTVERSE_API_KEY on the FOUNDRY server."))
-        if job.get("published"):
-            return await ctx.send(sender, chat(f"Already live: {job['published']['entry']}"))
+        if (job.get("published") or {}).get("released"):
+            return await ctx.send(sender, chat(f"Already deployed: {job['published']['entry']} "
+                                               f"({job['published'].get('publication_status')}). Say "
+                                               f"'recheck {job['job_id']}' to re-test discoverability."))
         self._update(job, status="publishing")
         await ctx.send(sender, chat("Publishing to Agentverse, then calling the live agent as an independent "
                                     "third party to confirm it behaves the same in production."))
@@ -564,19 +672,89 @@ class Foreman:
                 f"({bad.get('code', '')}: {str(bad.get('detail', ''))[:160]}). I tore down the deployment ({clean}), "
                 "so nothing unverified is live. The sandbox-verified build is unchanged, so you can retry publishing."))
         self._update(job, status="verified", published=out)
+        self.later(sender, self.publish_message(job, out))
+
+    @staticmethod
+    def publish_message(job, out) -> ChatMessage:
+        live, checks = out["live_invocation"], out.get("checks", {})
         live_txt = ("skipped" if live.get("skipped") else
                     f"{'PASS' if live.get('passed') else 'FAIL'} in {live.get('latency_s', '?')}s · "
                     f"reply: {(live.get('texts') or ['(none)'])[0][:120]}")
-        md = cards.detail(f"Live on Agentverse · {job['job_id']}", [
+        status = out.get("publication_status")
+        disc = out.get("discovery") or {}
+        md = cards.detail(f"{'Published' if status == 'DISCOVERABLE' else 'Deployed, not yet discoverable'} · "
+                          f"{job['job_id']}", [
+            ("Publication status", status),
+            ("Checks", " · ".join(f"{k}: {v}" for k, v in checks.items())),
             ("Entry agent", out["entry"]),
             ("Profile", out["profile_url"]),
             ("Independent live call", live_txt),
+            ("Agentverse search", f"{disc.get('status')} after {disc.get('after_s')}s"
+                                  + (f" (found by {disc.get('found_by')!r})" if disc.get("found_by") else
+                                     " · indexing can lag; tap Re-check discoverability")),
             ("Agents deployed", str(len(out["agents"]))),
-            ("Use it", "Open the profile or @mention the agent in ASI:One"),
-            ("Claim it", f"Run `python -m foundry claim {job['job_id']}` with your own Agentverse key to deploy this "
-                         "exact verified build into your account"),
-        ], [("Show evidence", {"action": "evidence", "job_id": job["job_id"]}, False)])
-        self.later(sender, chat(f"{job['job_id']} is live. Address: {out['entry']}", md))
+            ("Ownership", out.get("ownership", "FOUNDRY's Agentverse account")),
+            ("Claim it", f"`python -m foundry claim {job['job_id']}` with your own Agentverse key deploys this exact "
+                         "verified build into your account (FOUNDRY's copy is not transferred)"),
+        ], [("Re-check discoverability", {"action": "recheck", "job_id": job["job_id"]}, status != "DISCOVERABLE"),
+            ("Show evidence", {"action": "evidence", "job_id": job["job_id"]}, False)])
+        text = (f"{job['job_id']} is published and discoverable. Address: {out['entry']}" if status == "DISCOVERABLE"
+                else f"{job['job_id']} is deployed and answered correctly at {out['entry']}, but Agentverse search does "
+                     "not return it yet, so I am NOT calling it published. I'll re-check when you ask.")
+        return chat(text, md)
+
+    async def recheck(self, ctx, sender, job):
+        if not (job.get("published") or {}).get("released"):
+            return await ctx.send(sender, chat(f"{job['job_id']} has no live deployment to re-check."))
+        out = await asyncio.to_thread(publisher.recheck, job["job_id"])
+        self._update(job, published=out)
+        await ctx.send(sender, self.publish_message(job, out))
+
+    async def passport(self, ctx, sender, job):
+        from .. import passport as pp_mod
+        p = config.RUNS / job["job_id"] / "passport.json"
+        if not p.exists():
+            return await ctx.send(sender, chat(f"{job['job_id']} has no Proof Passport yet (status {job['status']})."))
+        pp = json.loads(p.read_text())
+        problems = await asyncio.to_thread(pp_mod.validate, p)
+        rows = pp_mod.summary_rows(pp) + [("Passport self-check", "valid: digests match the files and the ledger"
+                                           if not problems else "INVALID: " + "; ".join(problems)[:200])]
+        ctas = [("Inspect evidence", {"action": "evidence", "job_id": job["job_id"]}, False)]
+        if pp["verdict"] == "VERIFIED" and not (job.get("published") or {}).get("released"):
+            ctas.insert(0, ("Approve publication", {"action": "publish", "job_id": job["job_id"]}, True))
+            ctas.append(("Reject publication", {"action": "reject_publication", "job_id": job["job_id"]}, False))
+        if any(not a.get("skipped_run") for a in json.loads((config.RUNS / job["job_id"] / "result.json").read_text())
+               .get("attempts", [])[:-1]):
+            ctas.append(("Teach FOUNDRY", {"action": "learn", "job_id": job["job_id"]}, False))
+        await ctx.send(sender, chat("Proof Passport: what was observed, what is only inferred, and what remains "
+                                    "untested. Every digest can be re-checked with `passport-verify`.",
+                                    cards.detail(f"Proof Passport · {job['job_id']}", rows, ctas)))
+
+    async def reject_publication(self, ctx, sender, job):
+        self._update(job, publication_rejected=time.time())
+        ledger.append("publication_rejected", job_id=job["job_id"], by=sender)
+        await ctx.send(sender, chat(f"OK, {job['job_id']} will not be published. The verified build and its passport "
+                                    "stay available."))
+
+    async def compare(self, ctx, sender, a, b):
+        try:
+            va, vb = sk.load(a), sk.load(b)
+        except FileNotFoundError as e:
+            return await ctx.send(sender, chat(f"Unknown version: {e}"))
+        d = sk.diff_summary(va, vb)
+        evals = {e["version"]: e for e in ledger.read("promotion_eval") if e.get("version") in (a, b)}
+        rows = [("Lessons added", ", ".join(d["added"]) or "none"), ("Lessons removed", ", ".join(d["removed"]) or "none"),
+                ("Lessons edited", ", ".join(d["edited"]) or "none"),
+                ("Config changed", "yes: " + json.dumps({k: vb.config.get(k) for k in vb.config
+                                                         if va.config.get(k) != vb.config.get(k)})[:200]
+                 if d["config_changed"] else "no (same models, tools and repair budget)"),
+                ("Prompt size", f"{d['prompt_tokens'][0]} → {d['prompt_tokens'][1]} tokens")]
+        for v in (a, b):
+            if v in evals:
+                rows.append((f"Promotion set · {v}", f"{evals[v]['solved']}/{evals[v]['tasks']} tasks · "
+                                                     f"${evals[v]['usd_per_build']:.3f}/build"))
+        await ctx.send(sender, chat(f"{a} vs {b}:", cards.detail(f"Compare {a} → {b}", rows,
+                                                                  [("Version history", {"action": "history"}, False)])))
 
     async def status(self, ctx, sender):
         mine = sorted((j for j in self.jobs.values() if j.get("sender") == sender), key=lambda j: -j["created"])[:8]
@@ -651,19 +829,39 @@ class Foreman:
     def learn_message(self, job, d) -> ChatMessage:
         if not d:
             return chat(f"The verifier caught no defects while building {job['job_id']}, so there's nothing to learn.")
+        return self.verdict_message(d, f"defects caught while building {job['job_id']}")
+
+    @staticmethod
+    def verdict_message(d, learned_from: str) -> ChatMessage:
+        """Card C: the evolution verdict, with the evidence to check it."""
         cu, ce, p = d["current"], d["candidate_eval"], d["patch"]
         promoted = d["decision"] == "promoted"
-        md = cards.detail(f"{'Promoted' if promoted else 'Rolled back'} · {d['candidate']}", [
-            ("Learned from", f"defects caught while building {job['job_id']}"),
-            ("Root cause", str(d.get("root_cause") or "")[:220]),
-            ("Change to FOUNDRY", f"{p.get('kind')} {p.get('file', '') or json.dumps(p.get('config_changes', {}))}"[:200]),
-            ("Sealed promotion set", f"{cu.get('solved')}/{cu.get('tasks')} → {ce.get('solved')}/{ce.get('tasks')} tasks solved"),
-            ("Cost per build", f"${cu.get('usd_per_build', 0):.3f} → ${ce.get('usd_per_build', 0):.3f}"),
-            ("Decision", (f"PROMOTED to {d.get('new_version')}: " if promoted else "ROLLED BACK: ") + d["reason"]),
-        ], [("How FOUNDRY has evolved", {"action": "history"}, True),
-            ("Scoreboard", {"action": "scoreboard"}, False)])
-        return chat("The new skill generalised to unseen tasks, so it's now part of how I build." if promoted else
-                    "The change didn't beat the sealed set, so I rolled it back. I keep rejected ideas as evidence.", md)
+        t = d.get("transfer") or {}
+        eb = d.get("equal_budget") or {}
+        md = cards.detail(f"Evolution verdict · {'PROMOTED' if promoted else 'NOT PROMOTED'} · {d['candidate']}", [
+            ("Failure that triggered learning", f"{learned_from}: {str(d.get('root_cause') or '')[:180]}"),
+            ("Proposed change", f"{p.get('kind')} {p.get('file', '') or json.dumps(p.get('config_changes', {}))}"[:200]),
+            ("Original version", d["parent"]),
+            ("Candidate version", f"{d['candidate']}" + (f" → {d.get('new_version')}" if promoted else " (discarded)")),
+            ("Held-out comparison", f"sealed promotion set {cu.get('solved')}/{cu.get('tasks')} → "
+                                    f"{ce.get('solved')}/{ce.get('tasks')} solved; cases {cu.get('case_pass')}/"
+                                    f"{cu.get('case_total')} → {ce.get('case_pass')}/{ce.get('case_total')}"),
+            ("Transfer", f"{t.get('evaluation_tasks')} different tasks, {t.get('identical_tasks')} identical to the "
+                         f"source, max request similarity {t.get('max_request_similarity')}" if t else
+                         "dev-round lesson (no single source app)"),
+            ("Regressions", "none" if "regression" not in d["reason"] else d["reason"]),
+            ("Equal budget", f"${eb.get('usd_per_build')}/build cap for both; repair budget "
+                             f"{eb.get('repair_budget')}; routing changed: {eb.get('routing_changed')}" if eb else "-"),
+            ("Cost difference", f"${cu.get('usd_per_build', 0):.3f} → ${ce.get('usd_per_build', 0):.3f} per build"),
+            ("Decision", ("PROMOTED: " if promoted else "REJECTED, previous version kept: ") + d["reason"]),
+        ], [("Compare versions", {"action": "compare", "a": d["parent"], "b": d.get("new_version") or d["parent"]},
+             True),
+            ("Inspect rejected changes", {"action": "history"}, False),
+            ("View version history", {"action": "history"}, False)]
+            + ([("Roll back (admin)", {"action": "rollback", "version": d["parent"]}, False)] if promoted else []))
+        return chat("The change helped on different, unseen tasks with no regressions, so it's now part of how I build."
+                    if promoted else "The change didn't clear the promotion rule, so it was not adopted. Rejected "
+                    "changes are kept as evidence.", md)
 
     async def scoreboard(self, ctx, sender):
         rows = []

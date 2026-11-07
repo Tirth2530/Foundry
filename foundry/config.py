@@ -36,6 +36,12 @@ def env(name: str, default: str | None = None) -> str | None:
     return val if val not in (None, "") else default
 
 
+def price(name: str, default: str | None) -> float | None:
+    """USD per 1M tokens. 'unknown' (or empty with no default) => None, and paid calls to that model are refused."""
+    v = env(name, default)
+    return None if v in (None, "unknown", "none") else float(v)
+
+
 # ---------------------------------------------------------------- model providers
 # All three speak the OpenAI-compatible /chat/completions API.
 PROVIDERS = {
@@ -44,8 +50,8 @@ PROVIDERS = {
         "api_key": env("OPENAI_API_KEY"),
         "model": env("OPENAI_MODEL", "gpt-5"),
         # USD per 1M tokens (input, output). Override to match your model's pricing.
-        "price_in": float(env("OPENAI_PRICE_IN", "1.25")),
-        "price_out": float(env("OPENAI_PRICE_OUT", "10.0")),
+        "price_in": price("OPENAI_PRICE_IN", "1.25"),
+        "price_out": price("OPENAI_PRICE_OUT", "10.0"),
         "supports_temperature": env("OPENAI_SUPPORTS_TEMPERATURE", "false") == "true",
         # gpt-5 / o-series: low effort = faster, cheaper, and code output isn't starved by hidden reasoning
         "reasoning_effort": env("OPENAI_REASONING_EFFORT",
@@ -55,16 +61,16 @@ PROVIDERS = {
         "base_url": env("LLAMA_BASE_URL", "https://api.meta.ai/v1"),
         "api_key": env("LLAMA_API_KEY"),
         "model": env("LLAMA_MODEL", "muse-spark-1.1"),
-        "price_in": float(env("LLAMA_PRICE_IN", "0.27")),
-        "price_out": float(env("LLAMA_PRICE_OUT", "0.85")),
+        "price_in": price("LLAMA_PRICE_IN", "0.27"),
+        "price_out": price("LLAMA_PRICE_OUT", "0.85"),
         "supports_temperature": True,
     },
     "asi": {
         "base_url": env("ASI_BASE_URL", "https://api.asi1.ai/v1"),
         "api_key": env("ASI_ONE_API_KEY"),
         "model": env("ASI_MODEL", "asi1"),
-        "price_in": float(env("ASI_PRICE_IN", "1.0")),
-        "price_out": float(env("ASI_PRICE_OUT", "1.0")),
+        "price_in": price("ASI_PRICE_IN", "1.0"),
+        "price_out": price("ASI_PRICE_OUT", "1.0"),
         "supports_temperature": True,
     },
 }

@@ -71,9 +71,9 @@ def test_extract_agents_multi():
 
 def test_benchmark_is_well_formed_and_split():
     rep = bench.lint_all()
-    assert len(rep) == 32 and not any(rep.values())
+    assert len(rep) == 35 and not any(rep.values())   # 32 original + 3 coupled engineering tasks
     ids = [s["id"] for split in ("dev",) for s in bench._load_dir(bench.DIRS[split])]
-    assert len(ids) == 14
+    assert len(ids) == 16
     assert "tests" not in bench.public_view(bench._load_dir(bench.DIRS["dev"])[0])
 
 
@@ -141,3 +141,19 @@ def test_quartermaster_quotes_from_history(sandbox):
     assert "measured" in q1["basis"] and q1["price_usd"] >= config.MIN_CHARGE_USD
     r = quartermaster.reconcile(q1, 0.05)
     assert r["within_cap"] in (True, False) and "delta_pct" in r
+
+
+def test_benchmark_manifest_and_leakage_checks(tmp_path, monkeypatch):
+    rep = bench.integrity()
+    assert rep["errors"] == [], rep["errors"]                       # frozen manifest matches, no leakage
+    assert rep["multi_agent"]["final"] >= 1                          # final comparison includes coupled systems
+    d = tmp_path / "bench"
+    shutil.copytree(config.BENCH, d)
+    monkeypatch.setattr(bench, "DIRS", {"dev": d / "dev", "promotion": d / "sealed" / "promotion",
+                                        "final": d / "sealed" / "final"})
+    monkeypatch.setattr(bench, "MANIFEST", d / "MANIFEST.json")
+    leak = json.loads((d / "dev" / "d01_isbn13.json").read_text())
+    leak["id"] = "p99_leak"
+    (d / "sealed" / "promotion" / "p99_leak.json").write_text(json.dumps(leak))  # a dev task copied into sealed
+    errs = " | ".join(bench.integrity()["errors"])
+    assert "identical task" in errs and "differ from MANIFEST" in errs

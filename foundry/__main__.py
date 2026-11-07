@@ -12,8 +12,14 @@
   history                    every patch FOUNDRY proposed, and what the gate decided
   rollback vNNNN             point CURRENT back to an earlier skill version
   claim job_xxxxxx           deploy a verified build into YOUR Agentverse account (CLAIM_AGENTVERSE_API_KEY)
+  passport job_xxxxxx        (re)issue the Proof Passport for a build -> runs/<job>/passport.json
+  passport-verify <file>     deterministic check of a passport against the files and the ledger (exit 1 if invalid)
+  recheck job_xxxxxx         re-test whether a deployed agent is in the Agentverse search index
+  trace job_xxxxxx           show the end-to-end span tree (ASI:One intent -> roles -> sandbox -> gate -> publish)
+  recover                    tear down any deployment left half-finished by a crash (confirmed by a 404)
   report                     write evidence/report.md (numbers for the pitch)
-  lint                       validate benchmark specs and the ledger hash chain
+  lint                       validate specs, manifest, cross-split leakage and the ledger hash chain (exit 1 on error)
+  bench-freeze               write bench/MANIFEST.json (sha256 + fingerprint per spec; final set locked once used)
   search "<what you need>"   RAW Agentverse search only: is the search API returning real agents? (no LLM)
   scout "<what you need>"    full Scout: search Agentverse, then live-test the top matches (reuse vs build)
 """
@@ -46,14 +52,20 @@ def cmd_doctor(_):
             ok = False
             print(f"[!!] {p} ({c['model']}): {e}")
     if config.AGENTVERSE_API_KEY:
-        import requests
-        r = requests.get(f"{config.AGENTVERSE_URL}/v1/hosting/agents",
-                         headers={"Authorization": f"Bearer {config.AGENTVERSE_API_KEY}"}, timeout=20)
-        print(f"[{'ok' if r.status_code < 300 else '!!'}] Agentverse API key (HTTP {r.status_code})")
+        from . import agentverse
+        pr = agentverse.Client().probe_api()  # SAME version resolution as deployment (AGENTVERSE_HOSTING_API)
+        ok &= pr["ok"]
+        print(f"[{'ok' if pr['ok'] else '!!'}] Agentverse hosting API {pr['api']} (tried: {'; '.join(pr['tried'])})")
     else:
         print("[--] AGENTVERSE_API_KEY not set (needed for gate1/publish)")
     from .agents import payments
     print(f"[{'ok' if payments.enabled() else '--'}] Stripe test payments {'enabled' if payments.enabled() else 'off (demo mode)'}")
+    from .harness import run as harness
+    try:
+        print(f"[ok] sandbox mode: {harness.sandbox_mode()}")
+    except harness.SandboxNotConfigured as e:
+        ok = False
+        print(f"[!!] sandbox: {e}")
     sys.exit(0 if ok else 1)
 
 
@@ -90,8 +102,8 @@ def cmd_selftest(_):
     m = harness.run(multi, "coordinator", [{"name": "m", "turns": [{"send": "hello agents", "checks": [
         {"type": "text_contains", "value": "UPPER: HELLO AGENTS"}]}]}])
     tfail = topology.check_spec({"agents": ["upper", "coordinator"], "must_receive": ["upper"]}, m["raw"],
-                                ["upper", "coordinator"])
-    multi_ok = m["results"][0]["passed"] and m["raw"].get("traffic_tap") and not tfail
+                                ["upper", "coordinator"], "coordinator", m["results"])
+    multi_ok = m["results"][0]["passed"] and m["raw"].get("traffic_tap") and m["raw"].get("receive_tap") and not tfail
     print(f"  reply ok: {m['results'][0]['passed']}; traffic observed: {m['raw'].get('traffic')}; "
           f"tap installed: {m['raw'].get('traffic_tap')}")
     print(f"  sandbox mode: {m.get('sandbox')}")
@@ -104,6 +116,7 @@ def cmd_selftest(_):
     print(f"\nGATE 2: {'PASS' if passed else 'FAIL'} (evidence/gate2_selftest.json)")
     if not passed and g["stderr_tail"]:
         print("runner stderr:\n" + g["stderr_tail"])
+    sys.exit(0 if passed else 1)
 
 
 def cmd_build(a):
@@ -134,7 +147,7 @@ def cmd_serve(a):
         agent.run()
         return
     from .agents import network
-    roles = network.build_roles()
+    roles = network.build_roles(agent.address)  # role agents accept tasks from the Foreman only
     network.install(agent, roles)
     fm.Foreman(agent)
     print(f"FOUNDRY agent network: Foreman {agent.address} + {len(roles)} role agents")
@@ -234,7 +247,7 @@ def cmd_search(a):
 def cmd_scout(a):
     from . import llm, skills as sk
     from .roles import scout
-    res = scout.find(a.text, sk.load(), llm.CostMeter(cap_usd=0.5), [])
+    res = scout.find(a.text, sk.load(), llm.new_meter(0.5, name="scout"), [])
     print(f"search: {res['search_note']}  queries={res['search'].get('queries')}")
     for e in res["search"].get("errors", []):
         print(f"  search error: {e}")
@@ -245,6 +258,48 @@ def cmd_scout(a):
         print(f"    does what you need : {need.get('passed')}  reply={(need.get('texts') or ['(none)'])[0][:120]!r}")
         print(f"    does what it claims: {None if claim is None else claim.get('passed')}  claim={au.get('claim_text')!r}")
     print(f"\nDECISION: {'REUSE ' + res['candidate']['address'] if res['found'] else 'BUILD NEW (nothing passed live)'}")
+
+
+def cmd_recheck(a):
+    from .roles import publisher
+    out = publisher.recheck(a.job, wait_s=a.wait)
+    print(json.dumps({k: out.get(k) for k in ("publication_status", "entry", "checks", "discovery")}, indent=1))
+    sys.exit(0 if out["publication_status"] == "DISCOVERABLE" else 1)
+
+
+def cmd_passport(a):
+    from . import passport
+    path = passport.write(a.job)
+    pp = json.loads(path.read_text())
+    for k, v in passport.summary_rows(pp):
+        print(f"  {k:22s} {v}")
+    print(f"\nwritten: {path}")
+
+
+def cmd_passport_verify(a):
+    from pathlib import Path
+    from . import passport
+    problems = passport.validate(Path(a.path))
+    if problems:
+        print("PASSPORT INVALID:")
+        for p in problems:
+            print(f"  - {p}")
+        sys.exit(1)
+    pp = json.loads(Path(a.path).read_text())
+    print(f"PASSPORT VALID: {pp['passport_id']} verdict={pp['verdict']} code={pp['code']['system_sha256'][:16]} "
+          f"evidence files={len(pp['evidence'])} ledger anchor={pp['ledger_anchor']['hash']}")
+
+
+def cmd_recover(_):
+    from . import jobs
+    out = jobs.recover_all_publishes()
+    print(json.dumps(out, indent=1, default=str))
+    sys.exit(1 if any(o.get("cleanup_confirmed") is False for o in out) else 0)
+
+
+def cmd_trace(a):
+    from . import trace
+    print(trace.render(trace.read(a.job)) or f"no trace for {a.job}")
 
 
 def cmd_report(_):
@@ -263,6 +318,20 @@ def cmd_lint(_):
     print(f"ledger chain {'intact' if ok else 'BROKEN at record ' + str(n)} ({n} records)")
     for split in bench.DIRS:
         print(f"  {split} content hash {bench.split_hash(split)}")
+    integ = bench.integrity()
+    print(f"integrity: {integ['counts']} (multi-agent {integ['multi_agent']}), "
+          f"promotion set evaluated {integ['promotion_set_evaluations']}x")
+    for w in integ["warnings"]:
+        print(f"  warning: {w}")
+    for e in integ["errors"]:
+        print(f"  ERROR: {e}")
+    sys.exit(1 if bad or integ["errors"] or not ok else 0)
+
+
+def cmd_bench_freeze(a):
+    from . import bench
+    m = bench.freeze(force_final=a.force_final)
+    print(f"froze {len(m['files'])} spec files -> bench/MANIFEST.json; split hashes {m['split_hashes']}")
 
 
 def main():
@@ -294,8 +363,20 @@ def main():
     r.add_argument("version")
     c = sub.add_parser("claim")
     c.add_argument("job")
+    pa = sub.add_parser("passport")
+    pa.add_argument("job")
+    pv = sub.add_parser("passport-verify")
+    pv.add_argument("path")
+    rc = sub.add_parser("recheck")
+    rc.add_argument("job")
+    rc.add_argument("--wait", type=float, default=0, help="keep polling the search index for N seconds")
+    sub.add_parser("recover")
+    tr = sub.add_parser("trace")
+    tr.add_argument("job")
     sub.add_parser("report")
     sub.add_parser("lint")
+    bf = sub.add_parser("bench-freeze")
+    bf.add_argument("--force-final", action="store_true")
     se = sub.add_parser("search")
     se.add_argument("text")
     sc = sub.add_parser("scout")
@@ -303,7 +384,8 @@ def main():
     a = ap.parse_args()
     {"doctor": cmd_doctor, "gate1": cmd_gate1, "selftest": cmd_selftest, "build": cmd_build, "serve": cmd_serve,
      "evolve": cmd_evolve, "eval-final": cmd_eval_final, "history": cmd_history, "rollback": cmd_rollback,
-     "claim": cmd_claim, "learn": cmd_learn, "sandbox-build": cmd_sandbox_build, "report": cmd_report, "lint": cmd_lint, "search": cmd_search,
+     "claim": cmd_claim, "learn": cmd_learn, "sandbox-build": cmd_sandbox_build, "report": cmd_report, "recheck": cmd_recheck,
+     "passport": cmd_passport, "recover": cmd_recover, "trace": cmd_trace, "passport-verify": cmd_passport_verify, "lint": cmd_lint, "bench-freeze": cmd_bench_freeze, "search": cmd_search,
      "scout": cmd_scout}[a.cmd](a)
 
 

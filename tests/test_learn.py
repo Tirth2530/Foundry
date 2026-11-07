@@ -1,3 +1,4 @@
+import json
 """Live self-improvement from one build, and the controlled final evaluation."""
 from foundry import evolve, ledger, pipeline, skills as sk
 
@@ -65,3 +66,31 @@ def test_infra_errors_mid_round_abort_without_a_patch(sandbox, monkeypatch):
     evolve.run(1, say=lambda *_: None)
     assert ledger.read("round_aborted") and not ledger.read("patch_proposed")
     assert sk.current_version() == "v0000"
+
+
+def test_final_comparison_reports_separate_metrics_with_sample_sizes(sandbox):
+    from foundry import evolve as ev
+    ev.run(1, say=lambda *_: None)
+    out = ev.evaluate_final(repeats=2, say=lambda *_: None)
+    a, c = out["v0000"], out["v0001"]
+    assert a["arm"] == "A baseline" and c["arm"] == "C full evolved"
+    m = c["metrics"]
+    for k in ("success_rate", "success_rate_by_repeat", "success_rate_spread", "usd_per_successful_build",
+              "median_seconds", "incorrect_verification_rate", "regression_rate", "inter_agent_success_rate"):
+        assert k in m, k
+    assert len(m["success_rate_by_repeat"]) == 2 and m["builds"] == 2 * m["tasks"]
+    assert "small sample" in m["sample_note"]                       # 9 tasks x 2 repeats: says so
+    assert m["regressions_vs_baseline"] == [] and m["gained_vs_baseline"]
+    assert "score" not in json.dumps(m).lower()                     # no invented composite score
+    assert a["budget_usd_per_build"] == c["budget_usd_per_build"]   # equal budget per build
+    rec = ledger.read("final_eval")[-1]["results"]
+    assert all("_builds" not in arm and "_solved_set" not in arm for arm in rec.values())  # rows stay sealed
+
+
+def test_learning_records_transfer_to_different_tasks(sandbox):
+    sandbox["strict"] = True
+    res = pipeline.build("deployment approval agent with a review card", sk.load(), budget_usd=2.0)
+    d = evolve.learn_from_job(res["job_id"], say=lambda *_: None)
+    t = d["transfer"]
+    assert t["identical_tasks"] == 0 and t["evaluation_tasks"] == 10 and t["max_request_similarity"] < 0.6
+    assert d["equal_budget"]["routing_changed"] is False
