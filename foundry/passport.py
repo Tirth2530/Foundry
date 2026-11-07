@@ -349,9 +349,9 @@ def summary_rows(pp: dict) -> list[tuple[str, str]]:
                              f"code sha256 {pp['code']['system_sha256'][:12]}…"),
         ("Independent tests", f"{pp['tests']['status']}: {pp['tests']['passed']}/{pp['tests']['executed']} "
                               f"(author {pp['examiner']['provider']}, never saw the code)"),
-        ("Agent communication", f"{col['status']}" + (f": {ev.get('processed_observed')} processed messages, "
-                                                      f"peers {ev.get('peer_deliveries')}" if ev.get('peer_deliveries')
-                                                      else "")),
+        ("Agent communication", f"{col['status']}" + (": " + ", ".join(
+            f"{n} {v.get('in_passing_test')} matched send+receive in passing tests" for n, v in ev["peers"].items())
+            if ev.get("peers") else "")),
         ("Security", f"static gate {pp['security']['static_gate']} · sandbox {pp['security']['sandbox']} · "
                      "no credentials in sandbox"),
         ("Cards", f"{pp['cards']['status']} ({pp['cards']['emitted']} emitted)"),

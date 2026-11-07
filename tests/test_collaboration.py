@@ -17,9 +17,15 @@ def _recv(frm, to, t, ok=True, typ="Ask"):
     return {"from": frm, "to": to, "type": typ, "corr": f"c{t}", "t": t, "ok": ok}
 
 
-def _raw(received, windows=((0.0, 10.0),), send_tap=True, recv_tap=True):
+def _send_for(r):
+    """The send record the runner writes for the same message (same sender, receiver, correlation id)."""
+    return {"from": r["from"], "to": r["to"], "type": r["type"], "corr": r["corr"], "t": r["t"] - 0.01}
+
+
+def _raw(received, windows=((0.0, 10.0),), send_tap=True, recv_tap=True, sends=None):
     return {"traffic_tap": send_tap, "receive_tap": recv_tap, "received_log": received,
-            "traffic_log": [], "case_windows": [list(w) for w in windows]}
+            "traffic_log": [_send_for(r) for r in received] if sends is None else sends,
+            "case_windows": [list(w) for w in windows]}
 
 
 PASSED = [{"name": "c0", "passed": True}]
@@ -30,7 +36,8 @@ REAL = [_recv("client", "investigator", 1.0, typ="ChatMessage"), _recv("investig
 def test_real_three_agent_collaboration_passes():
     out = topology.evaluate(_raw(REAL), THREE, "investigator", REQ, PASSED)
     assert out["status"] == "PASS", out
-    assert out["evidence"]["peer_deliveries"] == {"verifier": 1, "publisher": 1}
+    assert out["evidence"]["peers"] == {"verifier": {"processed": 1, "matched": 1, "in_passing_test": 1},
+                                        "publisher": {"processed": 1, "matched": 1, "in_passing_test": 1}}
 
 
 def test_single_agent_pretending_to_be_three_fails():
@@ -50,8 +57,8 @@ def test_three_named_agents_where_entry_does_all_the_work_fails():
 def test_sends_without_a_processing_handler_are_not_proof():
     """Peers were *sent* messages but no handler ever processed them (dead or crashing peer)."""
     raw = _raw([_recv("client", "investigator", 1.0, typ="ChatMessage")])
-    raw["traffic_log"] = [{"from": "investigator", "to": "verifier", "type": "Ask", "t": 1.5},
-                          {"from": "verifier", "to": "publisher", "type": "Ask", "t": 2.0}]
+    raw["traffic_log"] += [{"from": "investigator", "to": "verifier", "type": "Ask", "corr": "x1", "t": 1.5},
+                           {"from": "verifier", "to": "publisher", "type": "Ask", "corr": "x2", "t": 2.0}]
     assert topology.evaluate(raw, THREE, "investigator", REQ, PASSED)["status"] == "FAIL"
     crashing = REAL[:2] + [_recv("verifier", "publisher", 2.0, ok=False)]
     out = topology.evaluate(_raw(crashing), THREE, "investigator", REQ, PASSED)
@@ -86,6 +93,59 @@ def test_plan_naming_three_agents_becomes_a_requirement():
     assert topology.required_from_plan({"agents": [{"name": "main"}]}, ["main"]) is None
 
 
+# ------------------------------------------------------------------ issue 2: both sides must match
+
+def _status(raw, results=PASSED):
+    return topology.evaluate(raw, THREE, "investigator", REQ, results)
+
+
+def test_receive_without_any_send_record_is_unverified_not_pass():
+    out = _status(_raw(REAL, sends=[]))
+    assert out["status"] == "UNVERIFIED"
+    assert all(f["code"] == topology.TOPOLOGY_UNVERIFIED for f in out["failures"])
+    assert out["evidence"]["peers"]["verifier"] == {"processed": 1, "matched": 0, "in_passing_test": 0}
+
+
+def test_send_must_match_sender_receiver_and_correlation_id():
+    good = [_send_for(r) for r in REAL]
+    wrong_corr = [dict(s, corr="other") if s["to"] == "verifier" else s for s in good]
+    wrong_sender = [dict(s, **{"from": "publisher"}) if s["to"] == "verifier" else s for s in good]
+    wrong_receiver = [dict(s, to="publisher") if s["to"] == "verifier" and s["from"] == "investigator" else s
+                      for s in good]
+    no_corr = [{k: v for k, v in s.items() if k != "corr"} for s in good]
+    for sends in (wrong_corr, wrong_sender, wrong_receiver, no_corr):
+        assert _status(_raw(REAL, sends=sends))["status"] == "UNVERIFIED", sends
+    assert _status(_raw(REAL, sends=good))["status"] == "PASS"
+
+
+def test_failed_send_does_not_count_as_a_delivery():
+    sends = [dict(_send_for(r), send_error="ConnectionError: refused") if r["to"] == "publisher" else _send_for(r)
+             for r in REAL]
+    assert _status(_raw(REAL, sends=sends))["status"] == "UNVERIFIED"
+
+
+def test_matched_evidence_must_lie_in_a_passing_test_window():
+    windows = ((0.0, 3.0), (5.0, 8.0))
+    results = [{"name": "ok", "passed": True}, {"name": "bad", "passed": False}]
+    sends = [dict(_send_for(r), t=6.0) if r["to"] == "verifier" else _send_for(r) for r in REAL]  # send in failing case
+    assert _status(_raw(REAL, windows, sends=sends), results)["status"] == "FAIL"
+
+
+def test_no_results_or_mismatched_windows_is_unverified():
+    assert _status(_raw(REAL), results=None)["status"] == "UNVERIFIED"
+    assert _status(_raw(REAL, windows=()), results=PASSED)["status"] == "UNVERIFIED"
+    two = [{"name": "a", "passed": True}, {"name": "b", "passed": True}]
+    assert _status(_raw(REAL, windows=((0.0, 10.0),)), results=two)["status"] == "UNVERIFIED"
+
+
+def test_fail_outranks_unverified():
+    """One peer silent (FAIL), another unconfirmed (UNVERIFIED): the verdict is FAIL."""
+    recv = REAL[:2]
+    out = _status(_raw(recv, sends=[]))
+    assert out["status"] == "FAIL"
+    assert {f["code"] for f in out["failures"]} == {"TOPOLOGY", topology.TOPOLOGY_UNVERIFIED}
+
+
 # ------------------------------------------------------------------ end-to-end through the release gate
 
 def _builder_and_plan(agents, plan_agents):
@@ -108,7 +168,8 @@ def _builder_and_plan(agents, plan_agents):
 def _runner(received, recv_tap=True):
     def run(agents, entry, cases, **kw):
         return {"raw": {"cases": [], "load_errors": {}, "traffic_tap": True, "receive_tap": recv_tap,
-                        "received_log": received, "traffic_log": [], "case_windows": [[0, 10]] * len(cases)},
+                        "received_log": received, "traffic_log": [_send_for(r) for r in received],
+                        "case_windows": [[0, 10]] * len(cases)},
                 "stderr_tail": "", "results": [{"name": c["name"], "passed": True, "turns": []} for c in cases]}
     return run
 

@@ -241,14 +241,16 @@ def test_agent_that_never_starts_is_not_released(sandbox):
 def test_collaboration_is_verified_from_observed_traffic():
     from foundry import topology
     topo = {"agents": ["catalog", "pricing", "desk"], "must_receive": ["catalog", "pricing"]}
-    real = {"traffic_tap": True, "receive_tap": True,
-            "received_log": [{"from": "client", "to": "desk", "type": "ChatMessage", "ok": True, "t": 1.0},
-                             {"from": "desk", "to": "catalog", "type": "Ask", "ok": True, "t": 1.1},
-                             {"from": "desk", "to": "pricing", "type": "Ask", "ok": True, "t": 1.2}]}
-    assert topology.check_spec(topo, real, ["catalog", "pricing", "desk"], "desk") == []
-    fake = {"traffic_tap": True, "receive_tap": True,
-            "received_log": [{"from": "client", "to": "desk", "type": "ChatMessage", "ok": True, "t": 1.0}]}
-    fails = topology.check_spec(topo, fake, ["catalog", "pricing", "desk"], "desk")
+    recv = [{"from": "client", "to": "desk", "type": "ChatMessage", "corr": "m0", "ok": True, "t": 1.0},
+            {"from": "desk", "to": "catalog", "type": "Ask", "corr": "a1", "ok": True, "t": 1.1},
+            {"from": "desk", "to": "pricing", "type": "Ask", "corr": "a2", "ok": True, "t": 1.2}]
+    real = {"traffic_tap": True, "receive_tap": True, "received_log": recv, "case_windows": [[0, 5]],
+            "traffic_log": [{k: v for k, v in r.items() if k != "ok"} for r in recv]}
+    assert topology.check_spec(topo, real, ["catalog", "pricing", "desk"], "desk", [{"passed": True}]) == []
+    fake = {"traffic_tap": True, "receive_tap": True, "case_windows": [[0, 5]],
+            "received_log": [{"from": "client", "to": "desk", "type": "ChatMessage", "corr": "m0", "ok": True, "t": 1.0}],
+            "traffic_log": [{"from": "client", "to": "desk", "type": "ChatMessage", "corr": "m0", "t": 0.9}]}
+    fails = topology.check_spec(topo, fake, ["catalog", "pricing", "desk"], "desk", [{"passed": True}])
     assert len(fails) == 2 and all(f["code"] == "TOPOLOGY" for f in fails)
     one_agent = topology.check_spec(topo, fake, ["main"], "main")
     assert "were not built" in one_agent[0]["detail"]
