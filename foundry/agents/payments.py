@@ -22,14 +22,14 @@ def create_checkout(amount_usd: float, job_id: str, user: str, description: str)
     stripe.api_key = config.STRIPE_SECRET_KEY
     cents = max(50, int(round(amount_usd * 100)))
     session = stripe.checkout.Session.create(
-        ui_mode="embedded", redirect_on_completion="if_required", payment_method_types=["card"],
+        ui_mode="embedded", redirect_on_completion="if_required",  # methods come from the Stripe dashboard
         mode="payment", return_url=f"{config.STRIPE_SUCCESS_URL}?session_id={{CHECKOUT_SESSION_ID}}",
         expires_at=int(time.time()) + 30 * 60,
         line_items=[{"price_data": {"currency": "usd", "product_data": {"name": "FOUNDRY verified build",
                                                                          "description": description[:200]},
                                     "unit_amount": cents}, "quantity": 1}],
         metadata={"job_id": job_id, "user_address": user},
-        idempotency_key=f"foundry-checkout-{job_id}-{cents}",  # a retried approve never creates a 2nd session
+        idempotency_key=f"foundry-checkout-v2-{job_id}-{cents}",  # a retried approve never creates a 2nd session
     )
     return {"client_secret": session.client_secret, "id": session.id, "checkout_session_id": session.id,
             "publishable_key": config.STRIPE_PUBLISHABLE_KEY, "currency": "usd", "amount_cents": cents,
