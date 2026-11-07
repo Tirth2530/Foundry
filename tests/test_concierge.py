@@ -100,3 +100,23 @@ def test_parse_rejects_unusable_model_output():
         with pytest.raises(concierge.ConciergeError):
             concierge.parse(bad)
     assert concierge.parse('{"intent":"command","command":"rm -rf","reply":"ok"}')["intent"] == "chat"
+
+
+def test_scout_that_hangs_or_crashes_still_ends_in_a_quote(sandbox, monkeypatch):
+    import time as _t
+    from foundry import pipeline, skills as sk
+    agent = Agent(name="foundry", seed="s")
+    f = fm.Foreman(agent)
+    out = []
+    monkeypatch.setattr(f, "later", lambda to, msg: out.append(msg))
+    monkeypatch.setattr(fm, "SCOUT_DEADLINE_S", 0.2)
+    real = pipeline.rpc
+    monkeypatch.setattr(pipeline, "rpc", lambda role, *a, **k: _t.sleep(2) if role == "scout" else real(role, *a, **k))
+    f._scout_worker("u", "Build an agent that reverses any text it gets", None, sk.load())
+    md = [dict(c.metadata) for m in out for c in m.content if getattr(c, "type", "") == "metadata"]
+    assert md and md[-1]["card_kind"] == "review" and "did not finish" in json.dumps(md[-1])
+
+    out.clear()
+    monkeypatch.setattr(f, "_scout_body", lambda *a, **k: 1 / 0)                       # crashes
+    f._scout_worker("u", "Build an agent that reverses any text it gets", None, sk.load())
+    assert out and "approve_cta" in json.dumps([dict(c.metadata) for c in out[-1].content if getattr(c, "type", "") == "metadata"])

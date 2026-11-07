@@ -32,6 +32,7 @@ from . import concierge, payments
 
 JOB_RE = re.compile(r"job_[0-9a-f]{6}")
 PLAN_RE = re.compile(r"plan_[0-9a-f]{6}")
+SCOUT_DEADLINE_S = float(config.env("FOUNDRY_SCOUT_DEADLINE_S", "150"))
 
 
 def _convos_dir():
@@ -493,11 +494,36 @@ class Foreman:
         await ctx.send(sender, chat("These are the only things this job can do:", md))
 
     def _scout_worker(self, sender, request, budget, v, agents=None):
+        """Always ends with a message to the user: a reuse offer, or a build quote that says what the Scout found.
+        Discovery is bounded by SCOUT_DEADLINE_S so a slow third-party agent can never stall the conversation."""
         try:
-            res = pipeline.rpc("scout", "find", scout.find, skills=v, meter=llm.new_meter(0.30, name="scout"), events=[],
-                               request=request)
+            self._scout_body(sender, request, budget, v, agents)
+        except Exception as e:  # noqa: BLE001 - never leave the user waiting in silence
+            import logging
+            logging.getLogger("foundry").exception("scout worker failed")
+            try:
+                _, msg = self._make_quote(sender, request, budget, v,
+                                          f"Scout step failed ({type(e).__name__}); quoting a fresh build instead.",
+                                          None, agents)
+                self.later(sender, msg)
+            except Exception as e2:  # noqa: BLE001
+                self.later(sender, chat(f"Something failed on my side ({type(e2).__name__}: {e2}). Nothing was "
+                                        "charged. Say 'build' again or describe the agent and I'll retry."))
+
+    def _scout_body(self, sender, request, budget, v, agents=None):
+        import concurrent.futures as cf
+        ex = cf.ThreadPoolExecutor(max_workers=1)
+        fut = ex.submit(pipeline.rpc, "scout", "find", scout.find, skills=v, meter=llm.new_meter(None, name="scout"),
+                        events=[], request=request)
+        try:
+            res = fut.result(timeout=SCOUT_DEADLINE_S)
+        except cf.TimeoutError:
+            res = {"found": False, "error": f"live re-checks of existing agents did not finish within "
+                                            f"{SCOUT_DEADLINE_S:.0f}s, so I'm not relying on them"}
         except Exception as e:  # noqa: BLE001 - discovery is optional; building is always available
             res = {"found": False, "error": f"{type(e).__name__}: {e}"}
+        finally:
+            ex.shutdown(wait=False)
         job = None
         if res.get("audits") or res.get("found"):
             job = {"job_id": pipeline.new_job_id(), "sender": sender, "request": request, "created": time.time()}
