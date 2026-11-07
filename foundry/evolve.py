@@ -124,7 +124,11 @@ def preflight(say=print) -> None:
     problems = []
     try:
         say(f"preflight: sandbox mode = {harness.sandbox_mode()}")
+        from .roles import judge
+        judge.require_docker("promotion")  # promotion evaluation runs on a sealed set: check the rule NOW
     except harness.InfrastructureError as e:
+        problems.append(str(e))
+    except PermissionError as e:
         problems.append(str(e))
     for role, prov in (("builder", "gpt"), ("examiner", "meta")):
         if not llm.available(sk.load().route(role)):

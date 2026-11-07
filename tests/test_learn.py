@@ -94,3 +94,12 @@ def test_learning_records_transfer_to_different_tasks(sandbox):
     t = d["transfer"]
     assert t["identical_tasks"] == 0 and t["evaluation_tasks"] == 10 and t["max_request_similarity"] < 0.6
     assert d["equal_budget"]["routing_changed"] is False
+
+
+def test_preflight_refuses_sealed_promotion_in_process_mode_without_a_reason(sandbox, monkeypatch):
+    import pytest
+    monkeypatch.delenv("FOUNDRY_ALLOW_PROCESS_SANDBOX_FOR_SEALED")
+    with pytest.raises(SystemExit) as e:
+        evolve.run(1, say=lambda *_: None)
+    assert "PREFLIGHT FAILED" in str(e.value) and "FOUNDRY_ALLOW_PROCESS_SANDBOX_FOR_SEALED" in str(e.value)
+    assert not ledger.read("build")  # nothing spent
