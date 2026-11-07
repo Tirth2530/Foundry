@@ -12,7 +12,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import config, ledger, llm, topology as topo
+from . import config, ledger, llm, topology as topo, trace as trace_mod
 from .harness import run as harness
 from .roles import adversary, architect, builder, card_validator, examiner, integrator
 
@@ -63,6 +63,22 @@ COLLAB_OK = {topo.PASS, topo.NOT_TESTED}  # NOT TESTED only ever means "single a
 
 
 def rpc(role: str, op: str, fn, *, skills=None, meter=None, events=None, **kw):
+    """Call a role (in-process or as a uAgents message). Every call is a span in the job's trace."""
+    with trace_mod.span(f"{role}.{op}", transport="agent-network" if TRANSPORT else "in-process") as attrs:
+        before = meter.total_usd if meter is not None else None
+        out = _rpc(role, op, fn, skills=skills, meter=meter, events=events, **kw)
+        if meter is not None:
+            attrs["usd"] = round(meter.total_usd - before, 6)
+        if role == "runner" and isinstance(out, dict):
+            raw = out.get("raw") or {}
+            attrs.update(sandbox=out.get("sandbox"), cases=len(out.get("results") or []),
+                         passed=sum(1 for r in out.get("results") or [] if r.get("passed")),
+                         inter_agent_processed=len([r for r in raw.get("received_log") or []
+                                                    if r.get("from") != "client" and r.get("ok")]))
+        return out
+
+
+def _rpc(role: str, op: str, fn, *, skills=None, meter=None, events=None, **kw):
     if TRANSPORT is None:
         if role in LLM_ROLES:
             return fn(**kw, skills=skills, meter=meter, events=events)
@@ -106,12 +122,29 @@ def build(request: str, skills, *, budget_usd: float | None = None, job_id: str 
     every later paid stage (checked before each stage and before each model call)."""
     job_id = job_id or new_job_id()
     jd = out_dir or (config.RUNS / job_id)
+    tracer = trace_mod.current() if (trace_mod.current() and trace_mod.current().trace_id == job_id) else \
+        trace_mod.Tracer(job_id, jd / "trace.jsonl")
+    with trace_mod.activate(tracer), tracer.span("build", skills=skills.version, spec=spec_id,
+                                                 budget_usd=budget_usd) as attrs:
+        res = _build(request, skills, budget_usd=budget_usd, job_id=job_id, hidden_tests=hidden_tests,
+                     spec_id=spec_id, progress=progress, jd=jd, topology=topology, parent_meter=parent_meter,
+                     cancel=cancel)
+        attrs.update(status=res["status"], usd=res["cost"]["total_usd"], attempts=len(res["attempts"]),
+                     collaboration=(res.get("collaboration") or {}).get("status"))
+        return res
+
+
+def _build(request, skills, *, budget_usd, job_id, hidden_tests, spec_id, progress, jd, topology,
+           parent_meter, cancel) -> dict:
     meter = llm.new_meter(budget_usd, parent=parent_meter, name=f"build {job_id}", job_id=job_id, cancel_event=cancel)
     events: list = []
     _say = progress or (lambda stage, info=None: None)
 
+    tracer = trace_mod.current()
+
     def say(stage, info=None):
         meter.raise_if_cancelled()  # cancellation checkpoint between stages
+        tracer.event(f"stage:{stage}", **{k: v for k, v in (info or {}).items() if k != "why"})
         _say(stage, info)
     t0 = time.time()
     result = {"job_id": job_id, "spec_id": spec_id, "skills_version": skills.version, "request": request,
@@ -216,6 +249,7 @@ def build(request: str, skills, *, budget_usd: float | None = None, job_id: str 
             result["verify_note"] = "inter-agent traffic not observable: collaboration UNVERIFIED, so the build is not verified"
         result["release_gate"] = {**gate, "collaboration_status": collab_final["status"], "static": final_static,
                                   "sandbox": result.get("sandbox")}
+        tracer.event("release_gate", **{k: v for k, v in gate.items()}, collaboration=collab_final["status"])
         ok = all(v for k, v in gate.items() if k != "examiner_tests_passed") and exam_passed == len(exam["cases"])
         result["status"] = "verified" if ok else "unverified"
     except llm.BudgetExceeded as e:

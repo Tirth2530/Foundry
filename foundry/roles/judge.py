@@ -42,9 +42,11 @@ def evaluate(skillset, split: str = "promotion", *, purpose: str, repeats: int =
     def one(job):
         spec, r = job
         jid = f"{split[:4]}_{skillset.version}_{spec['id']}_{r}{tag}"
-        return pipeline.build(spec["request"], skillset, budget_usd=config.DEFAULT_BUDGET_USD, job_id=jid,
-                              hidden_tests=spec["tests"], spec_id=spec["id"], topology=spec.get("topology"),
-                              out_dir=config.RUNS / "sealed" / jid, parent_meter=parent_meter)
+        b = pipeline.build(spec["request"], skillset, budget_usd=config.DEFAULT_BUDGET_USD, job_id=jid,
+                           hidden_tests=spec["tests"], spec_id=spec["id"], topology=spec.get("topology"),
+                           out_dir=config.RUNS / "sealed" / jid, parent_meter=parent_meter)
+        b["repeat"] = r
+        return b
 
     with ThreadPoolExecutor(max_workers=config.PARALLEL_BUILDS) as ex:
         builds = list(ex.map(one, jobs))
@@ -64,10 +66,14 @@ def evaluate(skillset, split: str = "promotion", *, purpose: str, repeats: int =
            "solved": len(solved), "case_pass": sum(v["cases_passed"] for v in per_spec.values()),
            "case_total": sum(v["cases"] for v in per_spec.values()),
            "usd_total": round(usd, 4), "usd_per_build": round(usd / max(1, len(builds)), 4)}
+    agg["_solved_set"] = sorted(solved)  # stays inside the judge process; stripped before sharing
+    from .. import compare
+    agg["_builds"] = [compare.per_build(b) for b in builds]  # outcome fields only, never tests or transcripts
+    agg["budget_usd_per_build"] = config.DEFAULT_BUDGET_USD
     SEALED_LOG.mkdir(parents=True, exist_ok=True)
     (SEALED_LOG / f"{split}_{skillset.version}{tag}.json").write_text(
-        json.dumps({"aggregate": agg, "per_spec": per_spec, "solved": sorted(solved)}, indent=1))
-    agg["_solved_set"] = sorted(solved)  # stays inside the judge process; stripped before sharing
+        json.dumps({"aggregate": public(agg), "per_spec": per_spec, "solved": sorted(solved),
+                    "builds": agg["_builds"]}, indent=1))
     return agg
 
 

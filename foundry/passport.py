@@ -232,6 +232,7 @@ def build_passport(job_id: str, job_dir: Path | None = None) -> dict:
         "limitations": limitations,
         "untested_assumptions": untested,
         "evidence": [{"path": _rel(p), "sha256": sha256_file(p)} for p in artifacts],
+        "trace": _rel(jd / "trace.jsonl") if (jd / "trace.jsonl").exists() else None,
         "experiments": exps,
         "ledger_anchor": _ledger_anchor(job_id),
         "verdict": verdict,

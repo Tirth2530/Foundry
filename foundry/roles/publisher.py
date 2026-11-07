@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import time
 
-from .. import agentverse, config, ledger
+from .. import agentverse, config, ledger, trace as trace_mod
 from . import livecheck
 
 BADGES = ("![tag:innovationlab](https://img.shields.io/badge/innovationlab-3D8BD3)\n"
@@ -62,6 +62,16 @@ def _progress(jid: str, **state) -> None:
 
 def publish(job: dict, smoke_case: dict | None, client: agentverse.Client | None = None,
             discovery_wait_s: float | None = None) -> dict:
+    t = trace_mod.Tracer(job.get("job_id", "unknown"))
+    with trace_mod.activate(t), t.span("publish") as attrs:
+        out = _publish(job, smoke_case, client, discovery_wait_s)
+        attrs.update(status=out["publication_status"], checks=out["checks"], entry=out["entry"],
+                     cleanup_confirmed=out["cleanup_confirmed"])
+        return out
+
+
+def _publish(job: dict, smoke_case: dict | None, client: agentverse.Client | None = None,
+             discovery_wait_s: float | None = None) -> dict:
     if job.get("status") != "verified":
         raise ValueError(f"refusing to publish {job.get('job_id')}: status is {job.get('status')}, not verified")
     jid = job["job_id"]
@@ -112,7 +122,9 @@ def publish(job: dict, smoke_case: dict | None, client: agentverse.Client | None
             raise agentverse.AgentverseError(f"agents never reported running: {not_running}")
         _progress(jid, stage="verifying")
         if smoke_case:
-            live = livecheck.run(client, addrs[build["entry"]], smoke_case)
+            with trace_mod.span("live_invocation", target=addrs[build["entry"]]) as la:
+                live = livecheck.run(client, addrs[build["entry"]], smoke_case)
+                la.update(passed=live.get("passed"), acked=live.get("acked"), latency_s=live.get("latency_s"))
         else:
             live = {"skipped": True, "passed": False, "checks": [{"type": "reply", "ok": False, "code": "NO_LIVE_TEST",
                                                                    "detail": "no independent test with an output check"}]}
@@ -129,9 +141,16 @@ def publish(job: dict, smoke_case: dict | None, client: agentverse.Client | None
     entry_addr = addrs.get(build["entry"])
     if released:
         wait = DISCOVERY_WAIT_S if discovery_wait_s is None else discovery_wait_s
-        discovery = check_discovery(client, entry_addr, f"{build['entry']}-{jid[-6:]}", job["request"], wait)
+        with trace_mod.span("discovery", entry=entry_addr) as da:
+            discovery = check_discovery(client, entry_addr, f"{build['entry']}-{jid[-6:]}", job["request"], wait)
+            da.update(status=discovery.get("status"), after_s=discovery.get("after_s"))
         checks["discoverable"] = {"PASS": PASS, "PENDING": UNVERIFIED}.get(discovery["status"], discovery["status"])
-    cleanup = {} if released else client.teardown(list(addrs.values()))
+    if released:
+        cleanup = {}
+    else:
+        with trace_mod.span("teardown", addresses=list(addrs.values())) as ta:
+            cleanup = client.teardown(list(addrs.values()))
+            ta.update(report=cleanup)
     cleanup_confirmed = all(v.get("delete") == "ok" and v.get("absent") is True for v in cleanup.values()) \
         if cleanup else None
     status = "FAILED" if not released else ("DISCOVERABLE" if checks["discoverable"] == PASS else "DEPLOYED")

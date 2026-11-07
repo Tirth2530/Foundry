@@ -15,6 +15,7 @@
   passport job_xxxxxx        (re)issue the Proof Passport for a build -> runs/<job>/passport.json
   passport-verify <file>     deterministic check of a passport against the files and the ledger (exit 1 if invalid)
   recheck job_xxxxxx         re-test whether a deployed agent is in the Agentverse search index
+  trace job_xxxxxx           show the end-to-end span tree (ASI:One intent -> roles -> sandbox -> gate -> publish)
   recover                    tear down any deployment left half-finished by a crash (confirmed by a 404)
   report                     write evidence/report.md (numbers for the pitch)
   lint                       validate specs, manifest, cross-split leakage and the ledger hash chain (exit 1 on error)
@@ -296,6 +297,11 @@ def cmd_recover(_):
     sys.exit(1 if any(o.get("cleanup_confirmed") is False for o in out) else 0)
 
 
+def cmd_trace(a):
+    from . import trace
+    print(trace.render(trace.read(a.job)) or f"no trace for {a.job}")
+
+
 def cmd_report(_):
     from . import report
     print(report.write())
@@ -365,6 +371,8 @@ def main():
     rc.add_argument("job")
     rc.add_argument("--wait", type=float, default=0, help="keep polling the search index for N seconds")
     sub.add_parser("recover")
+    tr = sub.add_parser("trace")
+    tr.add_argument("job")
     sub.add_parser("report")
     sub.add_parser("lint")
     bf = sub.add_parser("bench-freeze")
@@ -377,7 +385,7 @@ def main():
     {"doctor": cmd_doctor, "gate1": cmd_gate1, "selftest": cmd_selftest, "build": cmd_build, "serve": cmd_serve,
      "evolve": cmd_evolve, "eval-final": cmd_eval_final, "history": cmd_history, "rollback": cmd_rollback,
      "claim": cmd_claim, "learn": cmd_learn, "sandbox-build": cmd_sandbox_build, "report": cmd_report, "recheck": cmd_recheck,
-     "passport": cmd_passport, "recover": cmd_recover, "passport-verify": cmd_passport_verify, "lint": cmd_lint, "bench-freeze": cmd_bench_freeze, "search": cmd_search,
+     "passport": cmd_passport, "recover": cmd_recover, "trace": cmd_trace, "passport-verify": cmd_passport_verify, "lint": cmd_lint, "bench-freeze": cmd_bench_freeze, "search": cmd_search,
      "scout": cmd_scout}[a.cmd](a)
 
 

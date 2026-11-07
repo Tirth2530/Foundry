@@ -48,20 +48,25 @@ def gate(cur, cluster: dict, history: list, meter, repeats: int, say, origin: st
     say(f"evolver: {patch['kind']} {patch.get('file', patch.get('config_changes', ''))} :: {patch.get('rationale', '')[:160]}")
     ledger.append("patch_proposed", candidate=cand_id, parent=cur.version, patch=patch, origin=origin,
                   cluster={k: cluster[k] for k in ("code", "count", "spec_count", "root_cause") if k in cluster})
+    transfer = _transfer_distance(cluster) if origin.startswith("live build") else None
     cur_eval = _cached_promotion(cur.version)
     if cur_eval is None:
         cur_eval = judge.evaluate(cur, purpose=f"promotion baseline for {cur.version}", repeats=repeats,
                                   parent_meter=meter)
-        ledger.append("promotion_eval", **cur_eval)
+        ledger.append("promotion_eval", **_lean(cur_eval))
     cand_eval = judge.evaluate(cand, purpose=f"promotion candidate {cand_id}", repeats=repeats, parent_meter=meter)
-    ledger.append("promotion_eval", **cand_eval)
+    ledger.append("promotion_eval", **_lean(cand_eval))
     ok, reason = judge.decide(cur_eval, cand_eval)
     decision = {"candidate": cand_id, "parent": cur.version, "patch": patch, "reason": reason, "origin": origin,
                 "root_cause": cluster.get("root_cause"), "current": judge.public(cur_eval),
-                "candidate_eval": judge.public(cand_eval), "diff": sk.diff_summary(cur, cand)}
+                "candidate_eval": judge.public(cand_eval), "diff": sk.diff_summary(cur, cand),
+                "transfer": transfer,
+                "equal_budget": {"usd_per_build": config.DEFAULT_BUDGET_USD,
+                                 "repair_budget": [cur.config.get("repair_budget"), cand.config.get("repair_budget")],
+                                 "routing_changed": cur.config.get("routing") != cand.config.get("routing")}}
     if ok:
         new_v = sk.promote(cand)
-        ledger.append("promotion_eval", **{**cand_eval, "version": new_v})
+        ledger.append("promotion_eval", **{**_lean(cand_eval), "version": new_v})
         decision.update(decision="promoted", new_version=new_v)
         say(f"PROMOTED -> {new_v}: {reason}")
     else:
@@ -70,6 +75,32 @@ def gate(cur, cluster: dict, history: list, meter, repeats: int, say, origin: st
     ledger.append("patch_decision", **decision)
     history.append(decision)
     return decision
+
+
+def _lean(agg: dict) -> dict:
+    return {k: v for k, v in agg.items() if k != "_builds"}  # per-build rows stay in the sealed log
+
+
+def _transfer_distance(cluster: dict) -> dict:
+    """How different are the evaluation tasks from the application the lesson was learned on? Reports only
+    numbers (no sealed content): an identical task would make 'transfer' meaningless, so it is flagged."""
+    jobs = {e.get("job") for e in cluster.get("examples", []) if e.get("job")}
+    reqs = [(config.RUNS / j / "request.txt").read_text() for j in jobs if (config.RUNS / j / "request.txt").exists()]
+    if not reqs:
+        return {"source_jobs": sorted(jobs), "note": "source request not on disk"}
+    prom = bench._load_dir(bench.DIRS["promotion"])
+    src = set().union(*(bench._norm_tokens(r) for r in reqs))
+    sims = []
+    for sp in prom:
+        t = bench._norm_tokens(sp["request"])
+        sims.append(len(src & t) / max(1, len(src | t)))
+    src_fp = {bench.fingerprint({"request": r, "tests": []}) for r in reqs}
+    same = sum(1 for sp in prom if bench.fingerprint({"request": sp["request"], "tests": []}) in src_fp)
+    return {"source_jobs": sorted(jobs), "evaluation_tasks": len(prom), "identical_tasks": same,
+            "max_request_similarity": round(max(sims), 3) if sims else None,
+            "mean_request_similarity": round(sum(sims) / len(sims), 3) if sims else None,
+            "note": "evaluated on different tasks than the one it learned from" if not same else
+            "WARNING: a promotion task is identical to the source application"}
 
 
 def spent_since(t_start: str) -> float:
@@ -204,7 +235,7 @@ def evaluate_final(repeats: int = 2, say=print, reopen_reason: str | None = None
     cur = sk.load()
     arms = [base] if cur.version == base.version else [base, cur]
     if cur.version != base.version and cur.config != base.config:
-        arms.append(_lessons_only_arm(base, cur))
+        arms.insert(1, _lessons_only_arm(base, cur))  # order: A baseline, B lessons-only, C full evolved
     out = {}
     bench._FINAL_UNLOCKED = True
     try:
@@ -219,13 +250,20 @@ def evaluate_final(repeats: int = 2, say=print, reopen_reason: str | None = None
 
 
 def _run_final_arms(arms, repeats, say) -> dict:
-    out = {}
-    for s in arms:
+    """Same tasks, same acceptance tests, same per-build budget for every arm. Metrics from foundry.compare."""
+    from . import compare
+    out, base_solved = {}, None
+    for i, s in enumerate(arms):
         say(f"final eval: {s.version} x{repeats} (budget cap ${config.DEFAULT_BUDGET_USD}/build) ...")
         agg = judge.evaluate(s, split="final", purpose=f"final evaluation {s.version}", repeats=repeats, tag="_final")
-        out[s.version] = {**judge.public(agg), "routing": s.config.get("routing"),
-                          "repair_budget": s.config.get("repair_budget"), "lessons": len(s.lessons)}
-        say(json.dumps(out[s.version]))
+        m = compare.metrics(agg["_builds"], base_solved)
+        if i == 0:
+            base_solved = set(m["_solved_tasks"])
+        role = "A baseline" if i == 0 else ("B lessons-only" if s.version.endswith("lessons-only") else "C full evolved")
+        out[s.version] = {**judge.public(agg), "arm": role, "metrics": compare.public(m),
+                          "routing": s.config.get("routing"), "repair_budget": s.config.get("repair_budget"),
+                          "lessons": len(s.lessons)}
+        say(json.dumps({k: out[s.version][k] for k in ("arm", "solved", "tasks", "metrics")}))
     return out
 
 
