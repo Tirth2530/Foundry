@@ -19,9 +19,15 @@ def run(agents: list[dict], entry: str, cases: list[dict], *, turn_timeout: floa
     hard = 25 + turn_timeout * n_turns
     job = {"agents": agents, "entry": entry, "turn_timeout": turn_timeout, "hard_limit": hard,
            "cases": [{"name": c.get("name"), "turns": [{"send": t["send"]} for t in c["turns"]]} for c in cases]}
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+    # The job file must be readable by the sandbox's non-root user (uid 10001), so it goes in a
+    # dedicated dir with 0755/0644 instead of a 0600 NamedTemporaryFile. It contains no secrets
+    # and no test expectations: only the agent code and the messages to send.
+    job_dir = tempfile.mkdtemp(prefix="foundry_job_")
+    os.chmod(job_dir, 0o755)
+    path = os.path.join(job_dir, "job.json")
+    with open(path, "w") as f:
         json.dump(job, f)
-        path = f.name
+    os.chmod(path, 0o644)
     mode = sandbox_mode()
     work = tempfile.mkdtemp(prefix="foundry_run_")  # agent storage files land here, not in the repo
     try:
@@ -33,7 +39,7 @@ def run(agents: list[dict], entry: str, cases: list[dict], *, turn_timeout: floa
         out = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
         err = (e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")) + "\n[parent] child killed: timeout"
     finally:
-        os.unlink(path)
+        shutil.rmtree(job_dir, ignore_errors=True)
         shutil.rmtree(work, ignore_errors=True)
     raw = None
     for line in out.splitlines():

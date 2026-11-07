@@ -26,7 +26,7 @@ from uagents_core.contrib.protocols.payment import (
 )
 
 from .. import cards, config, ledger, llm, pipeline, skills as sk
-from ..roles import publisher, quartermaster, scout
+from ..roles import livecheck, publisher, quartermaster, scout
 from . import payments
 
 JOB_RE = re.compile(r"job_[0-9a-f]{6}")
@@ -523,7 +523,7 @@ class Foreman:
         sender = job["sender"]
         res = json.loads((config.RUNS / job["job_id"] / "result.json").read_text())
         exam = json.loads((config.RUNS / job["job_id"] / "examiner_tests.json").read_text())
-        smoke = (exam.get("cases") or [None])[0]
+        smoke = livecheck.pick_case(exam.get("cases"))  # needs a real output assertion, not just an ack
         try:
             out = pipeline.rpc("publisher", "publish", publisher.publish, job=res, smoke_case=smoke)
         except Exception as e:  # noqa: BLE001

@@ -71,7 +71,7 @@ def test_extract_agents_multi():
 
 def test_benchmark_is_well_formed_and_split():
     rep = bench.lint_all()
-    assert len(rep) == 30 and not any(rep.values())
+    assert len(rep) == 32 and not any(rep.values())
     ids = [s["id"] for split in ("dev",) for s in bench._load_dir(bench.DIRS[split])]
     assert len(ids) == 14
     assert "tests" not in bench.public_view(bench._load_dir(bench.DIRS["dev"])[0])

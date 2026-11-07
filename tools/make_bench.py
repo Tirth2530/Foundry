@@ -257,6 +257,21 @@ spec("promotion", "p08_release_review", "Release gate with review card",
      case("approve", t(J({"action": "approve", "service": "checkout", "version": "2.4.0"}), has("Released checkout 2.4.0"))),
      case("reject", t(J({"action": "reject", "service": "cart", "version": "1.0.1"}), has("Release of cart 1.0.1 blocked"))))
 
+spec("promotion", "p09_order_desk_multi", "Three-agent order desk with memory and review card",
+     "Build THREE agents. 'catalog' knows prices: pen 1.50, notebook 4.00, bag 25.00. 'pricing' computes the total: "
+     "10% discount if the subtotal is at least 20.00, then 8% tax on the discounted amount, rounded to 2 decimals. "
+     "'desk' is the entry agent: for 'order <qty> <product> [and <qty> <product> ...]' it asks catalog for prices and "
+     "pricing for the total, remembers the pending order for that user, and replies 'Total: $<total>' with a review "
+     "card titled 'Confirm order' with an Approve button (selection {\"action\":\"confirm\"}) and a Reject button "
+     "(selection {\"action\":\"cancel\"}). On confirm reply 'Order confirmed: <n> items, $<total>' (n = total "
+     "quantity); on cancel reply 'Order cancelled'; with no pending order reply 'No pending order'. For a product "
+     "not in the catalog reply 'Unknown product: <name>'.",
+     case("small_order", t("order 2 pen and 1 notebook", ACK, has("Total: $7.56"), card("review"))),
+     case("discount_confirm", t("order 1 bag", has("Total: $24.30"), card("review")),
+          t(J({"action": "confirm"}), has("Order confirmed: 1 items, $24.30"))),
+     case("no_pending", t(J({"action": "confirm"}), has("No pending order"))),
+     case("unknown", t("order 1 laptop", has("Unknown product: laptop"))))
+
 # ------------------------------------------------------------------ FINAL (untouched until the end)
 DIFF_OK = """diff --git a/app/main.py b/app/main.py
 --- a/app/main.py
@@ -366,6 +381,22 @@ spec("final", "f08_semver_range", "Semver range checker",
      case("caret_major", t("does 2.0.0 satisfy ^1.2.0", rx(r"^\s*NO"))),
      case("caret_zero", t("does 0.3.5 satisfy ^0.2.1", rx(r"^\s*NO"))),
      case("tilde_yes", t("does 1.2.9 satisfy ~1.2.3", rx(r"^\s*YES"))))
+
+
+spec("final", "f09_incident_router_multi", "Two-agent incident router with memory, carousel and review card",
+     "Build TWO agents. 'oncall' holds the schedule: payments -> maria, search -> dev, auth -> kim. 'router' is the "
+     "entry agent: for 'incident: <service> <severity>' (severity sev1, sev2 or sev3) it asks oncall who is on call, "
+     "records an incident for that user with id INC-<n> (n counts from 1 per user), and replies 'Paged <person> for "
+     "<service> (<severity>)'. For sev1 it also attaches a review card titled 'Escalate to manager?' with an Approve "
+     "button (selection {\"action\":\"escalate\",\"incident\":\"INC-<n>\"}) and a Reject button (selection "
+     "{\"action\":\"dismiss\"}); sev2/sev3 replies have no card. On the escalate selection reply '<incident> "
+     "escalated'. 'incidents' replies '<k> open incidents' with a carousel card, one item per incident (title = id, "
+     "subtitle = '<service> <severity>'). Unknown service: 'No on-call for <service>'.",
+     case("flow", t("incident: payments sev1", ACK, has("Paged maria for payments (sev1)"), card("review")),
+          t(J({"action": "escalate", "incident": "INC-1"}), has("INC-1 escalated")),
+          t("incident: search sev3", has("Paged dev for search (sev3)"), NOCARD),
+          t("incidents", has("2 open incidents"), card("carousel", min_items=2))),
+     case("unknown", t("incident: billing sev2", has("No on-call for billing"))))
 
 
 if __name__ == "__main__":

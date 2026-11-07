@@ -1,0 +1,83 @@
+{
+ "id": "p09_order_desk_multi",
+ "title": "Three-agent order desk with memory and review card",
+ "request": "Build THREE agents. 'catalog' knows prices: pen 1.50, notebook 4.00, bag 25.00. 'pricing' computes the total: 10% discount if the subtotal is at least 20.00, then 8% tax on the discounted amount, rounded to 2 decimals. 'desk' is the entry agent: for 'order <qty> <product> [and <qty> <product> ...]' it asks catalog for prices and pricing for the total, remembers the pending order for that user, and replies 'Total: $<total>' with a review card titled 'Confirm order' with an Approve button (selection {\"action\":\"confirm\"}) and a Reject button (selection {\"action\":\"cancel\"}). On confirm reply 'Order confirmed: <n> items, $<total>' (n = total quantity); on cancel reply 'Order cancelled'; with no pending order reply 'No pending order'. For a product not in the catalog reply 'Unknown product: <name>'.",
+ "tests": [
+  {
+   "name": "small_order",
+   "turns": [
+    {
+     "send": "order 2 pen and 1 notebook",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "Total: $7.56"
+      },
+      {
+       "type": "card",
+       "kind": "review"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "discount_confirm",
+   "turns": [
+    {
+     "send": "order 1 bag",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Total: $24.30"
+      },
+      {
+       "type": "card",
+       "kind": "review"
+      }
+     ]
+    },
+    {
+     "send": "{\"action\": \"confirm\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Order confirmed: 1 items, $24.30"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "no_pending",
+   "turns": [
+    {
+     "send": "{\"action\": \"confirm\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "No pending order"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "unknown",
+   "turns": [
+    {
+     "send": "order 1 laptop",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Unknown product: laptop"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -138,3 +138,39 @@ def test_sandbox_gets_no_credentials(monkeypatch, tmp_path):
     dcmd = harness._command("docker", "/tmp/job.json", str(tmp_path), 60)
     for flag in ("--network", "none", "--read-only", "--cap-drop", "ALL"):
         assert flag in dcmd
+
+
+def test_job_file_is_readable_by_the_sandbox_user(monkeypatch):
+    import os
+    import stat
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        job = next(a for a in cmd if str(a).endswith("job.json") and not str(a).startswith("/sandbox"))
+        seen["file"] = stat.S_IMODE(os.stat(job).st_mode)
+        seen["dir"] = stat.S_IMODE(os.stat(os.path.dirname(job)).st_mode)
+        seen["env"] = kw["env"]
+
+        class P:
+            stdout, stderr = 'FOUNDRY_RESULT:{"cases": [], "load_errors": {}}', ""
+        return P()
+    monkeypatch.setattr(harness.subprocess, "run", fake_run)
+    monkeypatch.setattr(harness, "sandbox_mode", lambda: "process")
+    harness.run([{"name": "main", "code": "x=1"}], "main", [{"name": "c", "turns": [{"send": "hi", "checks": []}]}])
+    assert seen["file"] & 0o004 and seen["dir"] & 0o005  # world-readable so uid 10001 in Docker can read it
+    assert "OPENAI_API_KEY" not in seen["env"]
+
+
+def test_publish_smoke_test_needs_an_output_assertion():
+    from foundry.roles import livecheck
+    ack_only = {"name": "a", "turns": [{"send": "hi", "checks": [{"type": "ack"}]}]}
+    real = {"name": "b", "turns": [{"send": "5 km", "checks": [{"type": "ack"}, {"type": "text_number", "value": 3.11}]}]}
+    assert livecheck.pick_case([ack_only, real]) is real
+    assert livecheck.pick_case([ack_only]) is None
+
+
+def test_publish_without_a_live_test_is_not_released(sandbox):
+    res = _verified_job(sandbox)
+    fake = FakeDeploy(reply="anything")
+    out = publisher.publish(res, None, client=fake)
+    assert out["released"] is False and fake.stopped

@@ -31,7 +31,8 @@ def quote(request: str, skills) -> dict:
     cap = round(max(p90 * 1.5, est * 2, 0.10), 2)
     price = max(config.MIN_CHARGE_USD, math.ceil(est * config.MARGIN * 100) / 100)
     return {"estimate_usd": round(est, 4), "p90_usd": round(p90, 4), "cap_usd": cap, "price_usd": round(price, 2),
-            "hosting": "Agentverse hosted (free tier)", "test_compute": "local sandbox, $0",
+            "hosting": "Agentverse hosted (not metered)", "test_compute": "local sandbox (not metered)",
+            "metered": "model tokens only",
             "basis": basis, "skills_version": skills.version}
 
 

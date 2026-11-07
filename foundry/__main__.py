@@ -102,10 +102,10 @@ def cmd_build(a):
     print(json.dumps({k: res.get(k) for k in ("job_id", "status", "verify", "examiner", "cost", "seconds", "error")},
                      indent=1, default=str))
     if a.publish and res["status"] == "verified":
-        from .roles import publisher
+        from .roles import livecheck, publisher
         from . import config
         exam = json.loads((config.RUNS / res["job_id"] / "examiner_tests.json").read_text())
-        print(json.dumps(publisher.publish(res, (exam.get("cases") or [None])[0]), indent=1))
+        print(json.dumps(publisher.publish(res, livecheck.pick_case(exam.get("cases"))), indent=1))
 
 
 def cmd_serve(a):
@@ -185,7 +185,7 @@ def cmd_rollback(a):
 def cmd_claim(a):
     import os
     from . import agentverse, config
-    from .roles import publisher
+    from .roles import livecheck, publisher
     key = os.getenv("CLAIM_AGENTVERSE_API_KEY")
     if not key:
         sys.exit("Set CLAIM_AGENTVERSE_API_KEY to the Agentverse API key of the account that should own the agent.")
@@ -193,7 +193,7 @@ def cmd_claim(a):
     if res["status"] != "verified":
         sys.exit("only verified builds can be claimed")
     exam = json.loads((config.RUNS / a.job / "examiner_tests.json").read_text())
-    out = publisher.publish(res, (exam.get("cases") or [None])[0], client=agentverse.Client(api_key=key))
+    out = publisher.publish(res, livecheck.pick_case(exam.get("cases")), client=agentverse.Client(api_key=key))
     print(json.dumps(out, indent=1))
 
 

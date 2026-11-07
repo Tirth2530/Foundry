@@ -37,7 +37,9 @@ def publish(job: dict, smoke_case: dict | None, client: agentverse.Client | None
             job["request"][:180])
         client.start(addrs[a["name"]])
     entry_addr = addrs[build["entry"]]
-    live = livecheck.run(client, entry_addr, smoke_case)
+    live = livecheck.run(client, entry_addr, smoke_case) if smoke_case else \
+        {"skipped": True, "passed": False, "checks": [{"type": "reply", "ok": False, "code": "NO_LIVE_TEST",
+                                                       "detail": "no independent test with an output check to run live"}]}
     released = bool(live.get("passed"))
     if not released:
         # RELEASE GATE: a deployment whose live behaviour wasn't confirmed is taken down again

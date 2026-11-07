@@ -140,14 +140,16 @@ computed from the ledger.
   `evolve`/`rollback` from chat are admin-only (`FOUNDRY_ADMINS`; say `whoami` to get your address). Learning runs
   are rate-limited.
 - **Single-use final set:** it can only be opened by `eval-final`, once. A second run needs `--reopen "<reason>"`,
-  which is logged and shown in the report.
+  which is logged and shown in the report. This is an application-level control plus a content hash in a
+  hash-chained ledger, not cryptographic sealing; in Docker mode generated code also can't read the files.
 - **What the tests prove:** `tests/test_offline.py`, `test_learn.py`, `test_scout.py`, `test_security.py` use a
   scripted model to prove the control logic for $0. `tests/test_real_engine.py` uses the REAL uAgents runtime and
   sandbox: correct vs defective agent, API keys not visible to generated code, sealed tests unreadable in Docker.
   The real proof of self-improvement is a live `evolve` run with your keys: its numbers come only from the ledger.
 
 ## Costs (measured, not guessed)
-Every model call is metered per role. The quote shows the estimate, the hard cap, and afterwards actual vs quoted.
+Model tokens are metered per role and per provider. Agentverse hosting and local sandbox compute are NOT metered
+(shown as such on the quote). The quote shows the estimate, the hard cap, and afterwards actual vs quoted.
 An evolution round is about 14 dev + 8 promotion builds (plus 8 baseline the first time). Watch
 `python -m foundry history` for $/build.
 

@@ -1,0 +1,77 @@
+{
+ "id": "f09_incident_router_multi",
+ "title": "Two-agent incident router with memory, carousel and review card",
+ "request": "Build TWO agents. 'oncall' holds the schedule: payments -> maria, search -> dev, auth -> kim. 'router' is the entry agent: for 'incident: <service> <severity>' (severity sev1, sev2 or sev3) it asks oncall who is on call, records an incident for that user with id INC-<n> (n counts from 1 per user), and replies 'Paged <person> for <service> (<severity>)'. For sev1 it also attaches a review card titled 'Escalate to manager?' with an Approve button (selection {\"action\":\"escalate\",\"incident\":\"INC-<n>\"}) and a Reject button (selection {\"action\":\"dismiss\"}); sev2/sev3 replies have no card. On the escalate selection reply '<incident> escalated'. 'incidents' replies '<k> open incidents' with a carousel card, one item per incident (title = id, subtitle = '<service> <severity>'). Unknown service: 'No on-call for <service>'.",
+ "tests": [
+  {
+   "name": "flow",
+   "turns": [
+    {
+     "send": "incident: payments sev1",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "Paged maria for payments (sev1)"
+      },
+      {
+       "type": "card",
+       "kind": "review"
+      }
+     ]
+    },
+    {
+     "send": "{\"action\": \"escalate\", \"incident\": \"INC-1\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "INC-1 escalated"
+      }
+     ]
+    },
+    {
+     "send": "incident: search sev3",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Paged dev for search (sev3)"
+      },
+      {
+       "type": "no_card"
+      }
+     ]
+    },
+    {
+     "send": "incidents",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "2 open incidents"
+      },
+      {
+       "type": "card",
+       "min_items": 2,
+       "kind": "carousel"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "unknown",
+   "turns": [
+    {
+     "send": "incident: billing sev2",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "No on-call for billing"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
