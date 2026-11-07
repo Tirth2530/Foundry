@@ -6,9 +6,11 @@ import os
 
 import pytest
 
-uagents = pytest.importorskip("uagents")
-if "stubs" in (getattr(uagents, "__file__", "") or ""):
-    pytest.skip("real uagents not installed", allow_module_level=True)
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+
+if subprocess.run([sys.executable, "-I", "-c", "import uagents, uagents_core"], capture_output=True).returncode:
+    pytest.skip("real uagents not installed for this interpreter", allow_module_level=True)
 
 from foundry import config, static_check  # noqa: E402
 from foundry.dsl import failures  # noqa: E402

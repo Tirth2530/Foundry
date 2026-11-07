@@ -8,10 +8,10 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-try:  # use real uagents when installed, otherwise a faithful-enough stub for logic tests
-    import uagents  # noqa: F401
-except ImportError:
-    sys.path.insert(0, str(Path(__file__).resolve().parent / "stubs"))
+# In-process logic tests ALWAYS use the lightweight uagents stub (the Foreman tests drive handlers directly).
+# The REAL uagents runtime is exercised by tests/test_real_engine.py through the sandboxed runner, which runs
+# in a separate `python -I` process (or Docker) where the stub is not on the path.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "stubs"))
 
 from foundry import config, ledger, llm, pipeline, skills as sk  # noqa: E402
 from foundry.harness import run as harness  # noqa: E402
