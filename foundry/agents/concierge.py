@@ -68,6 +68,11 @@ Return ONLY JSON:
           "request": "the complete build request FOUNDRY will execute: every behaviour, card, edge case and, for
                       multi-agent systems, each agent by name and who talks to whom"}}}}
 Use one agent unless coordination genuinely helps; for multi-agent plans name each agent.
+Games and anything random must be TESTABLE: write deterministic rules into the plan's request (e.g. for 2048: new
+tile is always a 2 placed in the first empty cell scanning row by row from the top-left; "new" starts a game with two
+2s in the first two cells; moves are up/down/left/right or u/d/l/r and also JSON card selections like
+{{"move":"left"}}; reply with the 4x4 board as text, the score, and a detail card with four move buttons; per-user game
+state in agent storage).
 
 CONTEXT
 The person's recent FOUNDRY jobs: {jobs}

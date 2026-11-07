@@ -86,6 +86,8 @@ class Foreman:
         self.convos: dict = {}   # sender -> [{"role","content"}]: the conversation the concierge reasons over
         self.plans: dict = {}    # plan_id -> {"sender", "plan"}: drafted with the user, built only on confirm
         self.sessions: dict = {}  # sender -> the context of their latest message (carries their ASI:One session)
+        self.trying: dict = {}    # user -> {"addr", "job_id"}: user is talking to their published agent via FOUNDRY
+        self.proxy: dict = {}     # published agent address -> user it is currently talking to
         self._load_jobs()
 
         chat_proto = Protocol(spec=chat_protocol_spec)
@@ -111,6 +113,16 @@ class Foreman:
             text = " ".join(c.text for c in msg.content if isinstance(c, TextContent)).strip()
             text = clean(text)
             started = any(isinstance(c, StartSessionContent) for c in msg.content)
+            if sender in self.proxy:  # a published agent answering a user who is trying it through FOUNDRY
+                return await self.relay_back(ctx, sender, msg)
+            if sender in self.trying:
+                if text.lower().strip(" .!") in ("exit", "stop", "back", "quit", "done", "foundry"):
+                    t = self.trying.pop(sender)
+                    self.proxy.pop(t["addr"], None)
+                    return await ctx.send(sender, chat(f"Back with FOUNDRY. ({t['job_id']} is still live on "
+                                                       "Agentverse; say 'try " + t["job_id"] + "' to use it again.)"))
+                self.sessions[sender] = ctx
+                return await self.relay_to_agent(ctx, sender, text)
             ctx.logger.info(f"chat from {sender[:14]}...: {text[:240]!r}")
             self.remember(sender, "user", _describe_user_turn(text))
             self.sessions[sender] = ctx  # replies sent later (scout, quote, build result) stay in this session
@@ -241,7 +253,7 @@ class Foreman:
             budget = sel.get("budget")
             agents = [a.strip() for a in str(sel.get("agents") or "").split(",") if a.strip()]
             return await self.quote(ctx, sender, req, budget, agents=agents or None)
-        job_actions = ("approve_quote", "reject_quote", "publish", "evidence", "reuse", "build_new", "learn",
+        job_actions = ("approve_quote", "reject_quote", "publish", "evidence", "reuse", "build_new", "learn", "try",
                        "recheck", "cancel", "passport", "permissions", "reject_publication")
         if action in job_actions and jid not in self.jobs:
             return await ctx.send(sender, chat(f"I couldn't find job {jid}. Say 'status' to see your jobs."))
@@ -262,6 +274,7 @@ class Foreman:
             return await ctx.send(sender, chat(f"Your address: {sender} (admin: {'yes' if sender in ADMINS else 'no'})"))
         handlers = {
             "approve_quote": lambda: self.approve(ctx, sender, self.jobs[jid]),
+            "try": lambda: self.try_agent(ctx, sender, self.jobs[jid]),
             "reuse": lambda: self.reuse(ctx, sender, self.jobs[jid], (sel or {}).get("pick")),
             "build_new": lambda: self.build_new(ctx, sender, self.jobs[jid]),
             "reject_quote": lambda: self.reject(ctx, sender, self.jobs[jid]),
@@ -311,6 +324,8 @@ class Foreman:
                 return "build_new", jid
             if "passport" in low:
                 return "passport", jid
+            if low.startswith(("try", "use", "play", "talk to", "open")):
+                return "try", jid
             if "permission" in low:
                 return "permissions", jid
             if "recheck" in low or "re-check" in low:
@@ -904,12 +919,47 @@ class Foreman:
             ("Ownership", out.get("ownership", "FOUNDRY's Agentverse account")),
             ("Claim it", f"`python -m foundry claim {job['job_id']}` with your own Agentverse key deploys this exact "
                          "verified build into your account (FOUNDRY's copy is not transferred)"),
-        ], [("Re-check discoverability", {"action": "recheck", "job_id": job["job_id"]}, status != "DISCOVERABLE"),
+        ], [("Try it here", {"action": "try", "job_id": job["job_id"]}, True),
+            ("Re-check discoverability", {"action": "recheck", "job_id": job["job_id"]}, False),
             ("Show evidence", {"action": "evidence", "job_id": job["job_id"]}, False)])
         text = (f"{job['job_id']} is published and discoverable. Address: {out['entry']}" if status == "DISCOVERABLE"
                 else f"{job['job_id']} is deployed and answered correctly at {out['entry']}, but Agentverse search does "
                      "not return it yet, so I am NOT calling it published. I'll re-check when you ask.")
         return chat(text, md)
+
+    async def try_agent(self, ctx, sender, job):
+        """Talk to a published agent right here: FOUNDRY forwards your messages to its Agentverse address and its
+        replies (text and cards) back into this chat. Say 'exit' to return to FOUNDRY."""
+        pub = job.get("published") or {}
+        addr = pub.get("entry")
+        if not (addr and pub.get("released")):
+            return await ctx.send(sender, chat(f"{job['job_id']} isn't live on Agentverse yet. Publish it first."))
+        old = self.trying.pop(sender, None)
+        if old:
+            self.proxy.pop(old["addr"], None)
+        self.trying[sender] = {"addr": addr, "job_id": job["job_id"]}
+        self.proxy[addr] = sender
+        self.sessions[sender] = ctx
+        ledger.append("try_started", job_id=job["job_id"], by=sender, agent=addr)
+        await ctx.send(sender, chat(
+            f"You're now talking to your agent live on Agentverse ({addr[:20]}…). Everything you type goes to it and "
+            "its replies come back here. Say **exit** to return to FOUNDRY."))
+        await self.relay_to_agent(ctx, sender, "hi")
+
+    async def relay_to_agent(self, ctx, sender, text: str):
+        t = self.trying[sender]
+        await ctx.send(t["addr"], ChatMessage(timestamp=_now(), msg_id=uuid4(),
+                                              content=[TextContent(type="text", text=text)]))
+
+    async def relay_back(self, ctx, agent_addr: str, msg: ChatMessage):
+        user = self.proxy[agent_addr]
+        content = [c for c in msg.content if isinstance(c, (TextContent, MetadataContent))]
+        if not content:
+            return
+        out = ChatMessage(timestamp=_now(), msg_id=uuid4(), content=content)
+        self.remember_out(user, out)
+        c = self.sessions.get(user) or ctx
+        await c.send(user, out)
 
     async def recheck(self, ctx, sender, job):
         if not (job.get("published") or {}).get("released"):

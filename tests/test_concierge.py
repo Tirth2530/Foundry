@@ -120,3 +120,36 @@ def test_scout_that_hangs_or_crashes_still_ends_in_a_quote(sandbox, monkeypatch)
     monkeypatch.setattr(f, "_scout_body", lambda *a, **k: 1 / 0)                       # crashes
     f._scout_worker("u", "Build an agent that reverses any text it gets", None, sk.load())
     assert out and "approve_cta" in json.dumps([dict(c.metadata) for c in out[-1].content if getattr(c, "type", "") == "metadata"])
+
+
+def test_try_a_published_agent_inside_the_foundry_chat(sandbox, monkeypatch):
+    from uagents_core.contrib.protocols.chat import MetadataContent
+    agent = Agent(name="foundry", seed="t")
+    f = fm.Foreman(agent)
+    on_chat = agent.handlers[ChatMessage]
+    ctx = Ctx(agent)
+    job = {"job_id": "job_abc123", "sender": "u1", "request": "2048", "status": "verified",
+           "published": {"released": True, "entry": "agent1qgame"}}
+    f.jobs[job["job_id"]] = job
+
+    async def say(text, who="u1", content=None):
+        await on_chat(ctx, who, ChatMessage(timestamp=datetime.now(timezone.utc), msg_id=uuid4(),
+                                            content=content or [TextContent(type="text", text=text)]))
+
+    async def go():
+        await say(json.dumps({"action": "try", "job_id": "job_abc123"}))
+        assert ctx.sent[-1][0] == "agent1qgame" and "exit" in _texts(ctx.sent[-2:-1])
+        await say("left")                                                   # user -> agent
+        assert ctx.sent[-1][0] == "agent1qgame" and _texts(ctx.sent[-1:]) == "left"
+        md = cards.detail("Board", [("Score", "4")], [("↑", {"move": "up"}, True)])
+        await say(None, who="agent1qgame", content=[TextContent(type="text", text="2 . . .\n. . . ."),
+                                                    MetadataContent(type="metadata", metadata=md)])
+        to, msg = ctx.sent[-1]                                              # agent -> user, card intact
+        assert to == "u1" and "2 . . ." in _texts([(to, msg)]) and _cards([(to, msg)])[0]["card_kind"] == "detail"
+        await say('{"move":"up"}')                                          # a card tap goes to the agent
+        assert ctx.sent[-1][0] == "agent1qgame"
+        await say("exit")
+        assert ctx.sent[-1][0] == "u1" and "Back with FOUNDRY" in _texts(ctx.sent[-1:]) and "u1" not in f.trying
+        await say(json.dumps({"action": "try", "job_id": "job_abc123"}), who="mallory")   # not mallory's job
+        assert "another user" in _texts(ctx.sent[-1:])
+    asyncio.run(go())
