@@ -83,65 +83,140 @@ class AgentverseError(RuntimeError):
 
 
 class Client:
-    def __init__(self, api_key: str | None = None, base: str | None = None):
+    """Agentverse hosting + search. ONE hosting API version is used consistently:
+    AGENTVERSE_HOSTING_API=auto (default) tries v1 on the first create and switches the whole client to v2
+    if v1 is gone (404/405/410); v1 or v2 forces a version. Every address remembers the version that
+    created it, so upload/start/stop/delete/logs never mix versions."""
+
+    GONE = (404, 405, 410)
+
+    def __init__(self, api_key: str | None = None, base: str | None = None, api: str | None = None):
         self.key = api_key or config.AGENTVERSE_API_KEY
         if not self.key:
             raise AgentverseError("AGENTVERSE_API_KEY is not set")
         self.base = (base or config.AGENTVERSE_URL).rstrip("/")
         self.h = {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
+        self.api = api or config.env("AGENTVERSE_HOSTING_API", "auto")
+        self.ver: dict[str, str] = {}
+        self.events: list[dict] = []
 
-    def _req(self, method, path, **kw):
-        r = requests.request(method, f"{self.base}{path}", headers=self.h, timeout=30, **kw)
-        if r.status_code >= 300:
-            raise AgentverseError(f"{method} {path} -> HTTP {r.status_code}: {r.text[:400]}")
-        try:
-            return r.json()
-        except ValueError:
-            return r.text
+    # ------------------------------------------------------------ http
+    def _req(self, method, path, retries: int = 2, **kw):
+        last = None
+        for a in range(retries + 1):
+            try:
+                r = requests.request(method, f"{self.base}{path}", headers=self.h, timeout=30, **kw)
+            except requests.RequestException as e:
+                last = AgentverseError(f"{method} {path} -> {type(e).__name__}: {e}")
+                time.sleep(1.5 * (a + 1))
+                continue
+            if r.status_code in (429, 500, 502, 503, 504) and a < retries:
+                last = AgentverseError(f"{method} {path} -> HTTP {r.status_code}: {r.text[:200]}")
+                time.sleep(2 * (a + 1))
+                continue
+            if r.status_code >= 300:
+                err = AgentverseError(f"{method} {path} -> HTTP {r.status_code}: {r.text[:400]}")
+                err.status = r.status_code
+                raise err
+            try:
+                return r.json()
+            except ValueError:
+                return r.text
+        raise last
 
+    def _v(self, addr: str | None = None) -> str:
+        if addr and addr in self.ver:
+            return self.ver[addr]
+        return "v2" if self.api == "v2" else "v1"
+
+    def _p(self, v: str, addr: str, suffix: str = "") -> str:
+        return (f"/v1/hosting/agents/{addr}" if v == "v1" else f"/v2/hosting/{addr}") + suffix
+
+    # ------------------------------------------------------------ hosting
     def create(self, name: str) -> str:
-        try:
-            data = self._req("POST", "/v1/hosting/agents", json={"name": name[:60]})
-        except AgentverseError as e:
-            if not any(f"HTTP {c}" in str(e) for c in (404, 405, 410)):
-                raise
-            data = self._req("POST", "/v2/hosting")  # newer API: created without profile; name set via update
-            if isinstance(data, dict) and data.get("address"):
-                self.update_profile(data["address"], name, "", name)
+        data = None
+        if self.api in ("auto", "v1"):
+            try:
+                data = self._req("POST", "/v1/hosting/agents", json={"name": name[:60]})
+                v = "v1"
+            except AgentverseError as e:
+                if self.api == "v1" or getattr(e, "status", None) not in self.GONE:
+                    raise
+                self.api = "v2"
+                self.events.append({"hosting_api": "switched to v2", "reason": str(e)[:200]})
+        if data is None:
+            data = self._req("POST", "/v2/hosting")
+            v = "v2"
         addr = data.get("address") if isinstance(data, dict) else None
         if not addr:
             raise AgentverseError(f"no address in create response: {data}")
+        self.ver[addr] = v
+        if v == "v2":
+            self.update_profile(addr, name, "", name)
         return addr
 
     def upload(self, addr: str, code: str) -> None:
         files = [{"language": "python", "name": "agent.py", "value": code}]
-        self._req("PUT", f"/v1/hosting/agents/{addr}/code", json={"code": json.dumps(files)})
+        self._req("PUT", self._p(self._v(addr), addr, "/code"), json={"code": json.dumps(files)})
 
     def update_profile(self, addr: str, name: str, readme: str, short: str) -> bool:
         try:
-            self._req("PUT", f"/v1/hosting/agents/{addr}",
-                      json={"name": name[:60], "readme": readme, "short_description": short[:200]})
+            if self._v(addr) == "v1":
+                self._req("PUT", self._p("v1", addr), json={"name": name[:60], "readme": readme,
+                                                             "short_description": short[:200]})
+            else:
+                self._req("PUT", f"/v2/agents/{addr}", json={"address": addr, "name": name[:60],
+                                                               "profile": {"description": short[:200], "readme": readme}})
             return True
         except AgentverseError:
             return False
 
     def start(self, addr: str) -> None:
-        try:
-            self._req("POST", f"/v1/hosting/agents/{addr}/start")
-        except AgentverseError as e:
-            if not any(f"HTTP {c}" in str(e) for c in (404, 405, 410)):
-                raise
-            self._req("POST", f"/v2/hosting/{addr}/start")
+        self._req("POST", self._p(self._v(addr), addr, "/start"))
 
     def stop(self, addr: str) -> None:
-        self._req("POST", f"/v1/hosting/agents/{addr}/stop")
+        self._req("POST", self._p(self._v(addr), addr, "/stop"))
 
     def delete(self, addr: str) -> None:
-        self._req("DELETE", f"/v1/hosting/agents/{addr}")
+        self._req("DELETE", self._p(self._v(addr), addr))
+
+    def get(self, addr: str) -> dict:
+        d = self._req("GET", self._p(self._v(addr), addr))
+        return d if isinstance(d, dict) else {}
 
     def logs(self, addr: str) -> str:
-        r = requests.get(f"{self.base}/v1/hosting/agents/{addr}/logs/latest", headers=self.h, timeout=30)
+        path = self._p(self._v(addr), addr, "/logs/latest" if self._v(addr) == "v1" else "/logs")
+        try:
+            r = requests.get(f"{self.base}{path}", headers=self.h, timeout=30)
+        except requests.RequestException:
+            return ""
         return r.text if r.status_code < 300 else ""
+
+    def wait_running(self, addr: str, timeout: float = 60) -> bool:
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            try:
+                d = self.get(addr)
+                if d.get("running") and d.get("compiled") is not False:
+                    return True
+            except AgentverseError:
+                pass
+            time.sleep(3)
+        return False
+
+    def teardown(self, addrs) -> dict:
+        """Stop and delete; report what was CONFIRMED, never assume."""
+        report = {}
+        for a in addrs:
+            res = {}
+            for op in ("stop", "delete"):
+                try:
+                    getattr(self, op)(a)
+                    res[op] = "ok"
+                except AgentverseError as e:
+                    res[op] = f"failed: {str(e)[:120]}"
+            report[a] = res
+        return report
 
     def search_agents(self, text: str, *, limit: int = 15, semantic: bool = True, retries: int = 2) -> list[dict]:
         """Agentverse marketplace search (POST /v1/search/agents). Retries transient failures;
@@ -204,11 +279,9 @@ class Client:
             for i in _indexed(logs, "FOUNDRY_RELAY_ACK "):
                 out[idx[i]["id"]]["acked"] = True
         finally:
-            for fn in (self.stop, self.delete):
-                try:
-                    fn(relay)
-                except AgentverseError:
-                    pass
+            cleanup = self.teardown([relay])
+            for rec in out.values():
+                rec["relay_cleanup"] = cleanup[relay]
         return out
 
     def invoke(self, target: str, message: str, wait_s: int = 150) -> dict:

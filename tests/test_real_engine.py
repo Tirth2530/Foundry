@@ -53,3 +53,22 @@ def test_docker_sandbox_cannot_read_sealed_tests():
     case = {"name": "read", "turns": [{"send": "hello", "checks": []}]}
     out = harness.run([{"name": "main", "code": code}], "main", [case])
     assert "READ:BLOCKED" in out["results"][0]["turns"][0]["reply_text"]
+
+
+def test_real_multi_agent_traffic_is_observed():
+    """Two real agents in the sandbox: coordinator must hand off to 'upper'. Proves the traffic tap
+    works on your uagents version, so TOPOLOGY checks are real, not assumed."""
+    from foundry import topology
+    agents = [{"name": "upper", "code": (REF / "multi_upper.py").read_text()},
+              {"name": "coordinator", "code": (REF / "multi_coordinator.py").read_text()}]
+    case = {"name": "m", "turns": [{"send": "hello agents", "checks": [{"type": "text_contains", "value": "UPPER: HELLO AGENTS"}]}]}
+    out = harness.run(agents, "coordinator", [case])
+    assert out["results"][0]["passed"], (out["results"], out["stderr_tail"])
+    raw = out["raw"]
+    assert raw.get("traffic_tap") is True, "traffic tap not installed on this uagents version"
+    assert topology.check_spec({"agents": ["upper", "coordinator"], "must_receive": ["upper"]},
+                               raw, ["upper", "coordinator"]) == []
+    # the same outputs from ONE agent must FAIL the collaboration check
+    assert topology.check_spec({"agents": ["upper", "coordinator"], "must_receive": ["upper"]},
+                               {"traffic_tap": True, "traffic": [{"from": "client", "to": "coordinator"}]},
+                               ["upper", "coordinator"])

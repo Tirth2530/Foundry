@@ -82,5 +82,16 @@
     }
    ]
   }
- ]
+ ],
+ "topology": {
+  "agents": [
+   "diff_parser",
+   "policy",
+   "gatekeeper"
+  ],
+  "must_receive": [
+   "diff_parser",
+   "policy"
+  ]
+ }
 }

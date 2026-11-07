@@ -19,13 +19,16 @@ from . import bench, config, ledger, llm, pipeline, skills as sk
 from .roles import evolver, judge, miner
 
 
-def build_dev(skillset, tag: str) -> list[dict]:
+def build_dev(skillset, tag: str, limit: int | None = None) -> list[dict]:
     specs = bench.load("dev", purpose="learning")
+    if limit:  # deterministic subset (sorted by id) for cheaper rounds
+        specs = specs[:limit]
 
     def one(spec):
         jid = f"dev_{skillset.version}_{spec['id']}{tag}"
         return pipeline.build(spec["request"], skillset, budget_usd=config.DEFAULT_BUDGET_USD, job_id=jid,
-                              hidden_tests=spec["tests"], spec_id=spec["id"], out_dir=config.RUNS / "dev" / jid)
+                              hidden_tests=spec["tests"], spec_id=spec["id"], out_dir=config.RUNS / "dev" / jid,
+                              topology=spec.get("topology"))
     with ThreadPoolExecutor(max_workers=config.PARALLEL_BUILDS) as ex:
         return list(ex.map(one, specs))
 
@@ -68,13 +71,35 @@ def gate(cur, cluster: dict, history: list, meter, repeats: int, say, origin: st
     return decision
 
 
-def run(rounds: int, repeats: int = 1, say=print) -> None:
+def spent_since(t_start: str) -> float:
+    return round(sum(b.get("usd") or 0 for b in ledger.read("build") if b["t"] >= t_start), 4)
+
+
+def estimate_round(dev_limit: int | None, repeats: int, usd_per_build: float | None = None) -> dict:
+    n_dev = min(dev_limit or 99, len(bench._load_dir(bench.DIRS["dev"])))
+    n_prom = len(bench._load_dir(bench.DIRS["promotion"])) * repeats
+    hist = [b["usd"] for b in ledger.read("build") if b.get("usd")][-30:]
+    per = usd_per_build or (sum(hist) / len(hist) if hist else None)
+    first = _cached_promotion(sk.current_version()) is None
+    builds = n_dev + n_prom * (2 if first else 1)
+    return {"builds": builds, "usd_per_build": per, "usd_estimate": round(builds * per, 2) if per else None,
+            "note": "includes a one-time promotion baseline" if first else "promotion baseline cached"}
+
+
+def run(rounds: int, repeats: int = 1, say=print, dev_limit: int | None = None, max_usd: float | None = None) -> None:
     history = ledger.read("patch_decision")
     meter = llm.CostMeter()
+    t_start = time.strftime("%Y-%m-%dT%H:%M:%S")
     for rnd in range(1, rounds + 1):
+        est = estimate_round(dev_limit, repeats)
+        say(f"round estimate: {est}")
+        if max_usd is not None and est["usd_estimate"] and spent_since(t_start) + est["usd_estimate"] > max_usd:
+            say(f"STOP: next round (~${est['usd_estimate']}) would exceed --max-usd {max_usd} "
+                f"(spent ${spent_since(t_start)} so far)")
+            break
         cur = sk.load()
         say(f"\n=== round {rnd}: current skills {cur.version} ({cur.prompt_tokens()} prompt tokens) ===")
-        dev = build_dev(cur, tag=f"_r{len(history)}")
+        dev = build_dev(cur, tag=f"_r{len(history)}", limit=dev_limit)
         solved = sum(1 for b in dev if (b.get("hidden") or {}).get("solved"))
         say(f"dev: {solved}/{len(dev)} tasks solved, ${sum(b['cost']['total_usd'] for b in dev):.3f}")
         ledger.append("dev_round", version=cur.version, solved=solved, tasks=len(dev),
@@ -86,7 +111,7 @@ def run(rounds: int, repeats: int = 1, say=print) -> None:
         say(f"miner: top cluster {cluster['code']} x{cluster['count']} over {cluster['spec_count']} tasks")
         say(f"  root cause: {cluster.get('root_cause', '')[:240]}")
         gate(cur, cluster, history, meter, repeats, say, origin=f"dev round on {cur.version}")
-    say(f"\nmeta-cost of evolution (miner+evolver): ${meter.total_usd:.3f}")
+    say(f"\nbuild spend this run: ${spent_since(t_start)} · meta-cost (miner+evolver): ${meter.total_usd:.3f}")
 
 
 def job_failures(job_id: str) -> list[dict]:
@@ -187,5 +212,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--repeats", type=int, default=1)
+    ap.add_argument("--dev-limit", type=int, default=None)
+    ap.add_argument("--max-usd", type=float, default=None)
     a = ap.parse_args()
-    run(a.rounds, a.repeats)
+    run(a.rounds, a.repeats, dev_limit=a.dev_limit, max_usd=a.max_usd)

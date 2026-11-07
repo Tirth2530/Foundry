@@ -28,7 +28,7 @@ def quote(request: str, skills) -> dict:
         basis = "token model (no history yet)"
     multi = 1.0 + 0.4 * max(0, request.lower().count("agent") - 1) if "agents" in request.lower() else 1.0
     est, p90 = est * multi, p90 * multi
-    cap = round(max(p90 * 1.5, est * 2, 0.10), 2)
+    cap = round(max(p90 * 2, est * 3, 0.50), 2)
     price = max(config.MIN_CHARGE_USD, math.ceil(est * config.MARGIN * 100) / 100)
     return {"estimate_usd": round(est, 4), "p90_usd": round(p90, 4), "cap_usd": cap, "price_usd": round(price, 2),
             "hosting": "Agentverse hosted (not metered)", "test_compute": "local sandbox (not metered)",

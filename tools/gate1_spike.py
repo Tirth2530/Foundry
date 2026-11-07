@@ -71,12 +71,14 @@ def main():
         c.upload(target, TARGET_CODE)
         c.start(target)
         step("target_started")
-        print("waiting 45s for the target to register...")
-        time.sleep(45)
+        running = c.wait_running(target, timeout=90)
+        step("target_running", running=running, hosting_api=c.api)
+        time.sleep(15)  # give the platform a moment to route messages to the new address
         reply = c.invoke(target, probe, wait_s=180)
         actual = (reply.get("texts") or [None])[0]
         ok = actual == expected
-        step("independent_invocation", relay=reply.get("relay"), acked=reply.get("acked"),
+        step("independent_invocation", relay=reply.get("relay"), relay_cleanup=reply.get("relay_cleanup"),
+             acked=reply.get("acked"),
              latency_s=reply.get("latency_s"), actual=actual, behavioral_match=ok)
         ev["observed"] = {"actual": actual, "behavioral_match": ok, "acked": reply.get("acked")}
         ev["result"] = "PASS" if ok else ("FAIL: no reply" if actual is None else "FAIL: wrong behaviour")
@@ -87,12 +89,11 @@ def main():
         step("api_error", error=str(e)[:400])
     finally:
         if target:
-            for fn in (c.stop, c.delete):
-                try:
-                    fn(target)
-                except agentverse.AgentverseError:
-                    pass
-            step("cleaned_up", note="target stopped and deleted; the relay deletes itself")
+            report = c.teardown([target])
+            relay_clean = ev["steps"][-1].get("relay_cleanup") if ev["steps"] else None
+            confirmed = all(v == "ok" for v in report[target].values())
+            ev["cleanup_confirmed"] = confirmed
+            step("cleanup", target=report[target], relay=relay_clean, confirmed=confirmed)
     ev["finished"] = datetime.now(timezone.utc).isoformat()
     (ROOT / "evidence").mkdir(exist_ok=True)
     out = ROOT / "evidence" / "gate1.json"

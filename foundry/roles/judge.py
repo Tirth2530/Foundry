@@ -25,7 +25,7 @@ def evaluate(skillset, split: str = "promotion", *, purpose: str, repeats: int =
         spec, r = job
         jid = f"{split[:4]}_{skillset.version}_{spec['id']}_{r}{tag}"
         return pipeline.build(spec["request"], skillset, budget_usd=config.DEFAULT_BUDGET_USD, job_id=jid,
-                              hidden_tests=spec["tests"], spec_id=spec["id"],
+                              hidden_tests=spec["tests"], spec_id=spec["id"], topology=spec.get("topology"),
                               out_dir=config.RUNS / "sealed" / jid)
 
     with ThreadPoolExecutor(max_workers=config.PARALLEL_BUILDS) as ex:

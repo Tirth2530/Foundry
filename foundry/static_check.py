@@ -14,9 +14,10 @@ FORBIDDEN_MODULES = {"subprocess", "multiprocessing", "ctypes", "socket", "impor
                      "os", "io", "tempfile", "fileinput", "zipfile", "tarfile", "sqlite3", "pty", "resource"}
 # Hosted agents keep state in ctx.storage; they never need the filesystem, environment or dynamic code.
 FORBIDDEN_CALLS = {"open", "eval", "exec", "compile", "__import__", "globals", "vars", "breakpoint", "input"}
-FORBIDDEN_ATTRS = {"environ", "getenv", "putenv", "system", "popen", "spawnl", "execv", "listdir", "scandir",
-                   "walk", "remove", "unlink", "rmdir", "chdir", "fork", "kill", "__subclasses__", "__globals__",
-                   "__builtins__", "__code__"}
+# Attribute names that only make sense on os/process objects (list.remove etc. are deliberately NOT here;
+# importing os/sys/subprocess is already forbidden, these catch access via other module aliases).
+FORBIDDEN_ATTRS = {"environ", "getenv", "putenv", "popen", "spawnl", "execv", "listdir", "scandir", "rmdir",
+                   "chdir", "fork", "__subclasses__", "__globals__", "__builtins__", "__code__"}
 STDLIB = set(getattr(sys, "stdlib_module_names", ()))
 
 

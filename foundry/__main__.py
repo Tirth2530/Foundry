@@ -5,7 +5,7 @@
   selftest                   Gate 2 (no LLM needed): harness catches a real defect in a known agent
   build "<request>"          one verified build with the current skills  [--publish]
   serve [--direct]           run the agent network (Foreman on ASI:One + 14 role agents)
-  evolve --rounds N          Gate 3: self-improvement rounds (dev -> patch -> sealed promotion gate)
+  evolve --rounds N          Gate 3 (--dev-limit N, --max-usd X, --estimate): self-improvement rounds (dev -> patch -> sealed promotion gate)
   eval-final [--repeats 2]   baseline v0000 vs current on the untouched final set (run once, at the end)
   sandbox-build              build the Docker sandbox (no network, no keys, resource-limited) for generated code
   learn job_xxxxxx           live self-improvement from ONE build's caught defects (sealed gate decides)
@@ -83,10 +83,24 @@ def cmd_selftest(_):
     print(f"  {bs['passed']}/{bs['cases']} passed; caught {len(fl)} failing checks:")
     for f in fl[:5]:
         print(f"   - {f['code']}: {f['detail'][:140]}")
-    passed = gs["passed"] == gs["cases"] and bs["passed"] < bs["cases"]
+    print("running a REAL two-agent system and checking the observed hand-off...")
+    from . import topology
+    multi = [{"name": "upper", "code": (ref / "multi_upper.py").read_text()},
+             {"name": "coordinator", "code": (ref / "multi_coordinator.py").read_text()}]
+    m = harness.run(multi, "coordinator", [{"name": "m", "turns": [{"send": "hello agents", "checks": [
+        {"type": "text_contains", "value": "UPPER: HELLO AGENTS"}]}]}])
+    tfail = topology.check_spec({"agents": ["upper", "coordinator"], "must_receive": ["upper"]}, m["raw"],
+                                ["upper", "coordinator"])
+    multi_ok = m["results"][0]["passed"] and m["raw"].get("traffic_tap") and not tfail
+    print(f"  reply ok: {m['results'][0]['passed']}; traffic observed: {m['raw'].get('traffic')}; "
+          f"tap installed: {m['raw'].get('traffic_tap')}")
+    print(f"  sandbox mode: {m.get('sandbox')}")
+    passed = gs["passed"] == gs["cases"] and bs["passed"] < bs["cases"] and bool(multi_ok)
     (config.EVIDENCE).mkdir(exist_ok=True)
     (config.EVIDENCE / "gate2_selftest.json").write_text(json.dumps(
-        {"good": gs, "bad": bs, "caught": fl, "gate2": "PASS" if passed else "FAIL"}, indent=1))
+        {"good": gs, "bad": bs, "caught": fl, "multi_agent": {"ok": bool(multi_ok), "traffic": m["raw"].get("traffic"),
+                                                              "topology_failures": tfail},
+         "sandbox": m.get("sandbox"), "gate2": "PASS" if passed else "FAIL"}, indent=1))
     print(f"\nGATE 2: {'PASS' if passed else 'FAIL'} (evidence/gate2_selftest.json)")
     if not passed and g["stderr_tail"]:
         print("runner stderr:\n" + g["stderr_tail"])
@@ -144,7 +158,10 @@ def cmd_serve(a):
 
 def cmd_evolve(a):
     from . import evolve
-    evolve.run(a.rounds, a.repeats)
+    if a.estimate:
+        print(json.dumps(evolve.estimate_round(a.dev_limit, a.repeats), indent=1))
+        return
+    evolve.run(a.rounds, a.repeats, dev_limit=a.dev_limit, max_usd=a.max_usd)
 
 
 def cmd_eval_final(a):
@@ -263,6 +280,9 @@ def main():
     e = sub.add_parser("evolve")
     e.add_argument("--rounds", type=int, default=3)
     e.add_argument("--repeats", type=int, default=1)
+    e.add_argument("--dev-limit", type=int, default=None, help="use only the first N dev tasks (cheaper rounds)")
+    e.add_argument("--max-usd", type=float, default=None, help="stop before a round that would exceed this spend")
+    e.add_argument("--estimate", action="store_true", help="print the cost estimate for one round and exit")
     f = sub.add_parser("eval-final")
     f.add_argument("--repeats", type=int, default=2)
     f.add_argument("--reopen", default=None, help="reason for reusing an already-used final set (logged)")

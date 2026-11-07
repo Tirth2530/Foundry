@@ -26,6 +26,7 @@ CHECK_TYPES = {"ack", "text_contains", "text_not_contains", "text_regex", "text_
 NO_REPLY, NO_ACK, TEXT, CARD_MISSING, CARD_INVALID, CARD_WRONG, NO_END, LOAD, STATIC, TIMEOUT = (
     "NO_REPLY", "NO_ACK", "TEXT_MISMATCH", "CARD_MISSING", "CARD_INVALID", "CARD_WRONG",
     "END_SESSION_MISSING", "LOAD_ERROR", "STATIC_VIOLATION", "HARNESS_TIMEOUT")
+TOPOLOGY = "TOPOLOGY"
 
 
 def validate_case(case) -> list[str]:

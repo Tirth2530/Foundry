@@ -44,5 +44,14 @@
     }
    ]
   }
- ]
+ ],
+ "topology": {
+  "agents": [
+   "classifier",
+   "release_notes"
+  ],
+  "must_receive": [
+   "classifier"
+  ]
+ }
 }

@@ -12,7 +12,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import config, ledger, llm
+from . import config, ledger, llm, topology as topo
 from .harness import run as harness
 from .roles import adversary, architect, builder, card_validator, examiner, integrator
 
@@ -87,7 +87,7 @@ def rpc(role: str, op: str, fn, *, skills=None, meter=None, events=None, **kw):
 
 def build(request: str, skills, *, budget_usd: float | None = None, job_id: str | None = None,
           hidden_tests: list | None = None, spec_id: str | None = None, progress=None,
-          out_dir: Path | None = None) -> dict:
+          out_dir: Path | None = None, topology: dict | None = None) -> dict:
     job_id = job_id or new_job_id()
     jd = out_dir or (config.RUNS / job_id)
     meter = llm.CostMeter(cap_usd=budget_usd)
@@ -134,11 +134,16 @@ def build(request: str, skills, *, budget_usd: float | None = None, job_id: str 
                 verify_results = run["results"]
                 result["sandbox"] = run.get("sandbox")
                 audit = rpc("card_validator", "audit", card_validator.audit, raw=run["raw"])
+                collab = topo.check_generic(run["raw"], [a["name"] for a in art["agents"]], art["entry"])
+                rec["collaboration"] = collab
+                rec["traffic"] = run["raw"].get("traffic")
+                rec["traffic_tap"] = run["raw"].get("traffic_tap")
                 summ = harness.summarize(verify_results)
                 rec.update(verify=summ, card_audit=audit, load_errors=run["raw"].get("load_errors"))
                 _write(ad / "verify.json", {"results": verify_results, "raw": run["raw"], "stderr": run["stderr_tail"]})
                 fb = _feedback(static, verify_results, audit, run["raw"], run["stderr_tail"], skills)
-                if summ["passed"] == summ["cases"] and not audit and not static:
+                fb += "".join(f"\n[collaboration] {c}" for c in collab)
+                if summ["passed"] == summ["cases"] and not audit and not static and not collab:
                     result["attempts"].append(rec)
                     break
             result["attempts"].append(rec)
@@ -157,8 +162,12 @@ def build(request: str, skills, *, budget_usd: float | None = None, job_id: str 
             say("hidden")
             hid = rpc("runner", "run", harness.run, agents=art["agents"], entry=art["entry"], cases=hidden_tests)
             hs = harness.summarize(hid["results"])
-            result["hidden"] = {**hs, "solved": hs["passed"] == hs["cases"],
-                                "failures": harness_failures(hid["results"])}
+            tfails = topo.check_spec(topology, hid["raw"], [a["name"] for a in art["agents"]])
+            result["hidden"] = {**hs, "solved": hs["passed"] == hs["cases"] and not tfails,
+                                "failures": harness_failures(hid["results"]) + tfails,
+                                "topology": {"required": topology, "traffic": hid["raw"].get("traffic"),
+                                             "observable": hid["raw"].get("traffic_tap"), "failures": tfails}
+                                if topology else None}
             _write(jd / "hidden.json", {"results": hid["results"], "stderr": hid["stderr_tail"]})
         # RELEASE GATE: every check, on the FINAL artifact, regardless of any tool setting
         final_static = rpc("integrator", "check", integrator.check, build=art)
@@ -172,7 +181,10 @@ def build(request: str, skills, *, budget_usd: float | None = None, job_id: str 
             "static_clean": not final_static,
             "cards_clean": not last.get("card_audit") and not last.get("skipped_run"),
             "no_load_errors": not last.get("load_errors"),
+            "agents_collaborate": not last.get("collaboration"),
         }
+        if len(art["agents"]) > 1 and not last.get("traffic_tap"):
+            result["verify_note"] = "inter-agent traffic not observable on this uagents version: collaboration unverified"
         result["release_gate"] = {**gate, "static": final_static, "sandbox": result.get("sandbox")}
         ok = all(v for k, v in gate.items() if k != "examiner_tests_passed") and exam_passed == len(exam["cases"])
         result["status"] = "verified" if ok else "unverified"

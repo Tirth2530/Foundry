@@ -47,19 +47,35 @@ def test_evolution_cannot_switch_off_its_own_verifier():
 
 
 class FakeDeploy:
-    def __init__(self, reply):
-        self.reply, self.stopped, self.n = reply, [], 0
+    """Agentverse stand-in using the REAL Client.teardown logic."""
+    api = "v1"
+
+    def __init__(self, reply, fail_on_upload=None, never_running=False):
+        self.reply, self.stopped, self.deleted, self.n = reply, [], [], 0
+        self.fail_on_upload, self.never_running = fail_on_upload, never_running
 
     def create(self, name):
         self.n += 1
         return f"agent1qdeployed{self.n}"
 
-    def upload(self, a, c): pass
+    def upload(self, a, c):
+        if self.fail_on_upload and a.endswith(str(self.fail_on_upload)):
+            from foundry.agentverse import AgentverseError
+            raise AgentverseError("HTTP 500 upload exploded")
+
     def update_profile(self, *a): return True
     def start(self, a): pass
+    def wait_running(self, a, timeout=60): return not self.never_running
 
     def stop(self, a):
         self.stopped.append(a)
+
+    def delete(self, a):
+        self.deleted.append(a)
+
+    def teardown(self, addrs):
+        from foundry.agentverse import Client
+        return Client.teardown(self, addrs)
 
     def invoke(self, target, message, wait_s=150):
         return {"texts": [self.reply], "cards": [], "acked": True, "latency_s": 5.0}
@@ -174,3 +190,63 @@ def test_publish_without_a_live_test_is_not_released(sandbox):
     fake = FakeDeploy(reply="anything")
     out = publisher.publish(res, None, client=fake)
     assert out["released"] is False and fake.stopped
+
+
+def _two_agent_job(sandbox):
+    res = _verified_job(sandbox)
+    p = config.RUNS / res["job_id"] / "final" / "build.json"
+    b = json.loads(p.read_text())
+    b["agents"].append({"name": "peer", "code": b["agents"][0]["code"]})
+    p.write_text(json.dumps(b))
+    return res
+
+
+def test_exception_mid_deploy_tears_down_everything_created(sandbox):
+    res = _two_agent_job(sandbox)
+    fake = FakeDeploy(reply="x", fail_on_upload=2)
+    out = publisher.publish(res, None, client=fake)
+    assert out["released"] is False and "upload exploded" in out["failure"]
+    assert sorted(fake.deleted) == sorted(out["agents"].values()) and out["cleanup_confirmed"] is True
+
+
+def test_agent_that_never_starts_is_not_released(sandbox):
+    res = _verified_job(sandbox)
+    case = {"name": "x", "turns": [{"send": "abc", "checks": [{"type": "text_contains", "value": "cba"}]}]}
+    out = publisher.publish(res, case, client=FakeDeploy(reply="cba", never_running=True))
+    assert out["released"] is False and "never reported running" in out["failure"]
+
+
+def test_collaboration_is_verified_from_observed_traffic():
+    from foundry import topology
+    topo = {"agents": ["catalog", "pricing", "desk"], "must_receive": ["catalog", "pricing"]}
+    real = {"traffic_tap": True, "traffic": [{"from": "client", "to": "desk", "type": "ChatMessage"},
+                                             {"from": "desk", "to": "catalog", "type": "Ask"},
+                                             {"from": "desk", "to": "pricing", "type": "Ask"}]}
+    assert topology.check_spec(topo, real, ["catalog", "pricing", "desk"]) == []
+    fake = {"traffic_tap": True, "traffic": [{"from": "client", "to": "desk", "type": "ChatMessage"}]}
+    fails = topology.check_spec(topo, fake, ["catalog", "pricing", "desk"])
+    assert len(fails) == 2 and all(f["code"] == "TOPOLOGY" for f in fails)
+    one_agent = topology.check_spec(topo, fake, ["main"])
+    assert "were not built" in one_agent[0]["detail"]
+    assert topology.check_generic(fake, ["desk", "catalog"], "desk")
+
+
+def test_budget_is_checked_before_the_call_not_after(monkeypatch):
+    import foundry.llm as L
+    m = L.CostMeter(cap_usd=0.01)
+    monkeypatch.setitem(config.PROVIDERS["gpt"], "api_key", "k")
+    called = []
+    monkeypatch.setattr(L.requests, "post", lambda *a, **k: called.append(1))
+    with pytest.raises(L.BudgetExceeded):
+        L.chat([{"role": "user", "content": "x" * 4000}], provider="gpt", role="builder", meter=m, max_tokens=8000)
+    assert not called  # refused before spending
+
+
+def test_static_gate_does_not_reject_ordinary_code():
+    from foundry import static_check
+    ok = open(config.ROOT / "tools" / "reference" / "good_agent.py").read().replace(
+        "agent.include(protocol", "items = [1, 2]\nitems.remove(1)\nd = {}\nd.pop('x', None)\nagent.include(protocol")
+    assert static_check.check(ok) == []
+    for name in ("multi_upper.py", "multi_coordinator.py"):
+        code = (config.ROOT / "tools" / "reference" / name).read_text()
+        assert static_check.check(code, entry=name == "multi_coordinator.py") == []

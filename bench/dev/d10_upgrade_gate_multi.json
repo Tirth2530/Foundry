@@ -66,5 +66,14 @@
     }
    ]
   }
- ]
+ ],
+ "topology": {
+  "agents": [
+   "parser",
+   "coordinator"
+  ],
+  "must_receive": [
+   "parser"
+  ]
+ }
 }

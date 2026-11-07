@@ -533,10 +533,12 @@ class Foreman:
         if not out.get("released"):
             self._update(job, status="verified", last_publish_attempt=out)
             bad = next((c for c in live.get("checks", []) if not c["ok"]), {})
+            clean = ("cleanup confirmed" if out.get("cleanup_confirmed") else
+                     f"cleanup NOT fully confirmed: {json.dumps(out.get('cleanup'))[:200]}")
             return self.later(sender, chat(
-                f"Release BLOCKED for {job['job_id']}: the deployed agent didn't pass its live check "
-                f"({bad.get('code', 'no reply')}: {str(bad.get('detail', ''))[:160]}). I stopped the deployment, so "
-                "nothing unverified is live. The sandbox-verified build is unchanged, so you can retry publishing."))
+                f"Release BLOCKED for {job['job_id']}: {out.get('failure')} "
+                f"({bad.get('code', '')}: {str(bad.get('detail', ''))[:160]}). I tore down the deployment ({clean}), "
+                "so nothing unverified is live. The sandbox-verified build is unchanged, so you can retry publishing."))
         self._update(job, status="verified", published=out)
         live_txt = ("skipped" if live.get("skipped") else
                     f"{'PASS' if live.get('passed') else 'FAIL'} in {live.get('latency_s', '?')}s · "

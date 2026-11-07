@@ -44,6 +44,33 @@ def _emit(payload: dict) -> None:
         os._exit(0)
 
 
+def _install_traffic_tap(traffic: list) -> bool:
+    """Record every ctx.send (sender address, destination, message type) so the parent can verify that a
+    multi-agent system really collaborates, instead of trusting the generated architecture."""
+    try:
+        import uagents.context as uc
+    except Exception:  # noqa: BLE001
+        return False
+    patched = False
+    for obj in list(vars(uc).values()):
+        fn = obj.__dict__.get("send") if isinstance(obj, type) else None
+        if fn is None or not asyncio.iscoroutinefunction(fn):
+            continue
+
+        def wrap(orig):
+            async def send(self, destination, message, *a, **kw):
+                try:
+                    me = getattr(getattr(self, "agent", None), "address", None) or getattr(self, "address", None)
+                    traffic.append({"from": str(me), "to": str(destination), "type": type(message).__name__})
+                except Exception:  # noqa: BLE001
+                    pass
+                return await orig(self, destination, message, *a, **kw)
+            return send
+        setattr(obj, "send", wrap(fn))
+        patched = True
+    return patched
+
+
 def main(job_path: str) -> None:
     job = json.load(open(job_path))
     turn_timeout = float(job.get("turn_timeout", 15))
@@ -55,6 +82,8 @@ def main(job_path: str) -> None:
         ChatAcknowledgement, ChatMessage, TextContent, chat_protocol_spec,
     )
 
+    traffic: list = []
+    tap = _install_traffic_tap(traffic)
     nonce = uuid.uuid4().hex[:8]
     bureau = Bureau(port=_free_port())
     agents = {a["name"]: Agent(name=f"gen-{a['name']}", seed=f"foundry-gen-{nonce}-{a['name']}")
@@ -71,9 +100,19 @@ def main(job_path: str) -> None:
         bureau.add(agents[spec["name"]])
 
     entry = job.get("entry") or job["agents"][0]["name"]
-    base = {"peers": peers, "entry": entry, "load_errors": load_errors}
+    base = {"peers": peers, "entry": entry, "load_errors": load_errors, "traffic_tap": tap}
+
+    def named_traffic():
+        inv = {v: k for k, v in peers.items()}
+        seen, out = set(), []
+        for t in traffic:
+            key = (inv.get(t["from"], "client"), inv.get(t["to"], "client"), t["type"])
+            if key not in seen:
+                seen.add(key)
+                out.append({"from": key[0], "to": key[1], "type": key[2]})
+        return out
     if entry in load_errors or not cases:
-        _emit({**base, "cases": []})
+        _emit({**base, "cases": [], "traffic": named_traffic()})
 
     results: list = [None] * len(cases)
     states: list = []
@@ -83,7 +122,7 @@ def main(job_path: str) -> None:
             for st, r in zip(states, results):
                 for t in r["turns"]:
                     t["acked"] = t.get("msg_id") in st["acks"]
-            _emit({**base, "cases": results})
+            _emit({**base, "cases": results, "traffic": named_traffic()})
 
     def serialize(msg) -> dict:
         texts, mds, end = [], [], False
@@ -154,7 +193,7 @@ def main(job_path: str) -> None:
         time.sleep(hard_limit)
         partial = [r or {"name": c.get("name"), "turns": [], "error": "case did not finish"}
                    for r, c in zip(results, cases)]
-        _emit({**base, "cases": partial, "watchdog": True})
+        _emit({**base, "cases": partial, "watchdog": True, "traffic": named_traffic()})
 
     threading.Thread(target=watchdog, daemon=True).start()
     bureau.run()

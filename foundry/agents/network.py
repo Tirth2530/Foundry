@@ -70,7 +70,7 @@ REGISTRY = {
                 "learn": (lambda job_id: __import__("foundry.evolve", fromlist=["x"]).learn_from_job(job_id, say=lambda *_: None), False)},
 }
 
-TIMEOUTS = {"scout": 400, "runner": 900, "builder": 400, "publisher": 400, "judge": 7200, "evolver": 14400}
+TIMEOUTS = {"scout": 900, "runner": 900, "builder": 400, "publisher": 1200, "judge": 7200, "evolver": 14400}
 
 
 def execute(task: dict) -> dict:

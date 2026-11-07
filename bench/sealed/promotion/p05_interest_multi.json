@@ -72,5 +72,14 @@
     }
    ]
   }
- ]
+ ],
+ "topology": {
+  "agents": [
+   "calculator",
+   "advisor"
+  ],
+  "must_receive": [
+   "calculator"
+  ]
+ }
 }

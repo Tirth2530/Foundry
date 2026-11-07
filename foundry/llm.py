@@ -48,9 +48,11 @@ class CostMeter:
             r["calls"] += 1
         return out
 
-    def check(self) -> None:
-        if self.cap_usd is not None and self.total_usd >= self.cap_usd:
-            raise BudgetExceeded(f"budget cap ${self.cap_usd:.2f} reached (${self.total_usd:.4f} spent)")
+    def check(self, upcoming_usd: float = 0.0) -> None:
+        """Refuse BEFORE a call that would likely push spend past the cap (not after)."""
+        if self.cap_usd is not None and self.total_usd + upcoming_usd > self.cap_usd:
+            raise BudgetExceeded(f"budget cap ${self.cap_usd:.2f}: ${self.total_usd:.4f} spent, next call "
+                                 f"estimated ${upcoming_usd:.4f}")
 
     def add(self, rec: dict) -> None:
         with self._lock:
@@ -78,10 +80,11 @@ def resolve(provider: str) -> tuple[str, bool]:
 def chat(messages: list[dict], *, provider: str, role: str, meter: CostMeter | None = None,
          temperature: float | None = 0.2, max_tokens: int = 6000, retries: int = 3) -> dict:
     """Call a provider. Returns {text, provider, model, fell_back, usd, tokens_in, tokens_out}."""
-    if meter:
-        meter.check()
     used, fell_back = resolve(provider)
     p = config.PROVIDERS[used]
+    if meter:
+        est_in = sum(len(m.get("content", "")) for m in messages) / 4
+        meter.check(est_in / 1e6 * p["price_in"] + 0.5 * max_tokens / 1e6 * p["price_out"])
     body: dict = {"model": p["model"], "messages": messages}
     if temperature is not None and p["supports_temperature"]:
         body["temperature"] = temperature

@@ -79,5 +79,16 @@
     }
    ]
   }
- ]
+ ],
+ "topology": {
+  "agents": [
+   "catalog",
+   "pricing",
+   "desk"
+  ],
+  "must_receive": [
+   "catalog",
+   "pricing"
+  ]
+ }
 }

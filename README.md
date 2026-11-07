@@ -97,7 +97,8 @@ python -m foundry gate1            # GATE 1: create + deploy + independently inv
 python -m foundry sandbox-build    # Docker sandbox for generated code (do this before evolve)
 python -m foundry selftest         # GATE 2: the runner catches real defects in a known agent (no LLM)  -> evidence/gate2_selftest.json
 python -m foundry build "Base64 tool. 'encode <text>' replies 'base64: <encoded>'..."   # one real verified build
-python -m foundry evolve --rounds 3   # GATE 3: self-improvement against the sealed promotion set
+python -m foundry evolve --estimate --dev-limit 7      # what one round will cost, before spending anything
+python -m foundry evolve --rounds 1 --dev-limit 7 --max-usd 15   # GATE 3: one affordable round first
 python -m foundry learn job_xxxxxx # live: one build's caught defects -> one skill change -> sealed gate decides
 python -m foundry history          # every patch, the numbers, promoted or rolled back
 python -m foundry serve            # the 16-agent network; Foreman goes live for ASI:One
@@ -134,15 +135,25 @@ computed from the ledger.
   read-only root, 768MB, 1 CPU, all capabilities dropped, non-root, only the runner and job file mounted (the sealed
   tests are not reachable). The Integrator also statically forbids files, env, eval/exec and os/sys/subprocess.
   **Build the Docker sandbox before running `evolve`.**
-- **Publish gate:** the live agent must pass its test on Agentverse, or the deployment is stopped and logged as
-  `publish_failed`. It never enters the reuse catalog.
+- **Publish gate (transactional):** every agent must report `running` on Agentverse and the live entry agent
+  must pass an independent test with a real output assertion. Any failure (an exception mid-deploy, an agent that
+  never starts, a failed live check) tears down everything that publish created. The result records which
+  stop/delete calls were confirmed, and the build never enters the reuse catalog.
+- **Real collaboration, not just a claimed one:** the sandbox records every message agents send to each other.
+  Multi-agent benchmark tasks require the named agents to exist AND the required ones to receive messages from
+  another agent, so a single agent faking the outputs fails (`TOPOLOGY`). For any multi-agent build, the release
+  gate fails if a peer agent is never used.
+- **Agentverse hosting API:** one version per client (`AGENTVERSE_HOSTING_API=auto|v1|v2`). `auto` switches the
+  whole client to v2 if v1 is gone. Each address remembers its version, so upload/start/stop/delete/logs never mix.
+- **Budget:** each model call is checked against the cap BEFORE it is made. `evolve --estimate` prints the cost of a
+  round; `--dev-limit N` and `--max-usd X` keep rounds affordable.
 - **Authorization:** only the requesting address can approve, pay, publish, inspect or learn from its job.
   `evolve`/`rollback` from chat are admin-only (`FOUNDRY_ADMINS`; say `whoami` to get your address). Learning runs
   are rate-limited.
 - **Single-use final set:** it can only be opened by `eval-final`, once. A second run needs `--reopen "<reason>"`,
   which is logged and shown in the report. This is an application-level control plus a content hash in a
   hash-chained ledger, not cryptographic sealing; in Docker mode generated code also can't read the files.
-- **What the tests prove:** `tests/test_offline.py`, `test_learn.py`, `test_scout.py`, `test_security.py` use a
+- **What the tests prove:** (the number of passing tests is NOT the number of real builds) `tests/test_offline.py`, `test_learn.py`, `test_scout.py`, `test_security.py` use a
   scripted model to prove the control logic for $0. `tests/test_real_engine.py` uses the REAL uAgents runtime and
   sandbox: correct vs defective agent, API keys not visible to generated code, sealed tests unreadable in Docker.
   The real proof of self-improvement is a live `evolve` run with your keys: its numbers come only from the ledger.

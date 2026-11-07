@@ -49,8 +49,21 @@ def J(d):
 SPECS = {"dev": [], "promotion": [], "final": []}
 
 
+TOPO = {  # multi-agent specs: these agents must exist AND these must receive messages from another agent
+    "d10_upgrade_gate_multi": {"agents": ["parser", "coordinator"], "must_receive": ["parser"]},
+    "p05_interest_multi": {"agents": ["calculator", "advisor"], "must_receive": ["calculator"]},
+    "p09_order_desk_multi": {"agents": ["catalog", "pricing", "desk"], "must_receive": ["catalog", "pricing"]},
+    "f01_pr_gate_multi": {"agents": ["diff_parser", "policy", "gatekeeper"], "must_receive": ["diff_parser", "policy"]},
+    "f07_release_notes_multi": {"agents": ["classifier", "release_notes"], "must_receive": ["classifier"]},
+    "f09_incident_router_multi": {"agents": ["oncall", "router"], "must_receive": ["oncall"]},
+}
+
+
 def spec(split, sid, title, request, *cases):
-    SPECS[split].append({"id": sid, "title": title, "request": request, "tests": list(cases)})
+    s = {"id": sid, "title": title, "request": request, "tests": list(cases)}
+    if sid in TOPO:
+        s["topology"] = TOPO[sid]
+    SPECS[split].append(s)
 
 
 # ------------------------------------------------------------------ DEV (learning)
