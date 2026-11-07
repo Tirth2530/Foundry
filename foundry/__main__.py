@@ -12,6 +12,8 @@
   claim job_xxxxxx           deploy a verified build into YOUR Agentverse account (CLAIM_AGENTVERSE_API_KEY)
   report                     write evidence/report.md (numbers for the pitch)
   lint                       validate benchmark specs and the ledger hash chain
+  search "<what you need>"   RAW Agentverse search only: is the search API returning real agents? (no LLM)
+  scout "<what you need>"    full Scout: search Agentverse, then live-test the top matches (reuse vs build)
 """
 from __future__ import annotations
 
@@ -180,6 +182,39 @@ def cmd_claim(a):
     print(json.dumps(out, indent=1))
 
 
+def cmd_search(a):
+    from . import agentverse
+    c = agentverse.Client()
+    for semantic in (True, False):
+        try:
+            hits = c.search_agents(a.text, limit=10, semantic=semantic)
+        except agentverse.AgentverseError as e:
+            print(f"[{'semantic' if semantic else 'keyword'}] SEARCH FAILED: {e}")
+            continue
+        print(f"\n[{'semantic' if semantic else 'keyword'} search] {len(hits)} agents for {a.text!r}")
+        for h in hits:
+            chat = "chat" if agentverse.has_chat_protocol(h) else "no-chat"
+            print(f"  {h.get('status', '?'):7s} {chat:7s} {str(h.get('name'))[:40]:40s} {h.get('address')}")
+            readme = str(h.get("readme") or h.get("description") or "").replace("\n", " ")
+            print(f"           readme: {readme[:110]!r}  success={h.get('recent_success_rate')}")
+
+
+def cmd_scout(a):
+    from . import llm, skills as sk
+    from .roles import scout
+    res = scout.find(a.text, sk.load(), llm.CostMeter(cap_usd=0.5), [])
+    print(f"search: {res['search_note']}  queries={res['search'].get('queries')}")
+    for e in res["search"].get("errors", []):
+        print(f"  search error: {e}")
+    print(f"considered: {res['considered']}")
+    for au in res["audits"]:
+        c, need, claim = au["candidate"], au.get("need") or {}, au.get("claim")
+        print(f"\n  {c.get('name')} {c['address']} [{c['source']}] listing={c.get('platform')}")
+        print(f"    does what you need : {need.get('passed')}  reply={(need.get('texts') or ['(none)'])[0][:120]!r}")
+        print(f"    does what it claims: {None if claim is None else claim.get('passed')}  claim={au.get('claim_text')!r}")
+    print(f"\nDECISION: {'REUSE ' + res['candidate']['address'] if res['found'] else 'BUILD NEW (nothing passed live)'}")
+
+
 def cmd_report(_):
     from . import report
     print(report.write())
@@ -222,10 +257,15 @@ def main():
     c.add_argument("job")
     sub.add_parser("report")
     sub.add_parser("lint")
+    se = sub.add_parser("search")
+    se.add_argument("text")
+    sc = sub.add_parser("scout")
+    sc.add_argument("text")
     a = ap.parse_args()
     {"doctor": cmd_doctor, "gate1": cmd_gate1, "selftest": cmd_selftest, "build": cmd_build, "serve": cmd_serve,
      "evolve": cmd_evolve, "eval-final": cmd_eval_final, "history": cmd_history, "rollback": cmd_rollback,
-     "claim": cmd_claim, "report": cmd_report, "lint": cmd_lint}[a.cmd](a)
+     "claim": cmd_claim, "report": cmd_report, "lint": cmd_lint, "search": cmd_search,
+     "scout": cmd_scout}[a.cmd](a)
 
 
 if __name__ == "__main__":
