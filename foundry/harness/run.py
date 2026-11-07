@@ -80,7 +80,7 @@ def docker_status() -> str:
 
 
 def sandbox_mode() -> str:
-    want = config.env("FOUNDRY_SANDBOX", "auto")
+    want = config.env("FOUNDRY_SANDBOX", "process")
     if want == "process":
         return "process"
     st = docker_status()

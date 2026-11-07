@@ -49,7 +49,7 @@ PROVIDERS = {
         "supports_temperature": env("OPENAI_SUPPORTS_TEMPERATURE", "false") == "true",
         # gpt-5 / o-series: low effort = faster, cheaper, and code output isn't starved by hidden reasoning
         "reasoning_effort": env("OPENAI_REASONING_EFFORT",
-                                "low" if env("OPENAI_MODEL", "gpt-5").startswith(("gpt-5", "o")) else "") or None,
+                                "medium" if env("OPENAI_MODEL", "gpt-5").startswith(("gpt-5", "o")) else "") or None,
     },
     "meta": {
         "base_url": env("LLAMA_BASE_URL", "https://api.meta.ai/v1"),
@@ -88,4 +88,4 @@ MARGIN = float(env("FOUNDRY_MARGIN", "1.5"))  # price = estimated cost * margin
 # ---------------------------------------------------------------- build loop defaults
 DEFAULT_BUDGET_USD = float(env("FOUNDRY_BUDGET_USD", "1.50"))
 TURN_TIMEOUT_S = float(env("FOUNDRY_TURN_TIMEOUT", "15"))
-PARALLEL_BUILDS = int(env("FOUNDRY_PARALLEL", "4"))
+PARALLEL_BUILDS = int(env("FOUNDRY_PARALLEL", "3"))

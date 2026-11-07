@@ -134,7 +134,7 @@ computed from the ledger.
   in a temp dir with CPU/file limits. With `python -m foundry sandbox-build` it runs in Docker instead: no network,
   read-only root, 768MB, 1 CPU, all capabilities dropped, non-root, only the runner and job file mounted (the sealed
   tests are not reachable). The Integrator also statically forbids files, env, eval/exec and os/sys/subprocess.
-  **Build the Docker sandbox before running `evolve`.**
+  Docker is optional (`FOUNDRY_SANDBOX=docker` after `sandbox-build`); the default process sandbox already keeps API keys away from generated code.
 - **Publish gate (transactional):** every agent must report `running` on Agentverse and the live entry agent
   must pass an independent test with a real output assertion. Any failure (an exception mid-deploy, an agent that
   never starts, a failed live check) tears down everything that publish created. The result records which
