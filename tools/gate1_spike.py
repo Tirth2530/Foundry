@@ -73,8 +73,9 @@ def main():
         step("target_started")
         running = c.wait_running(target, timeout=90)
         step("target_running", running=running, hosting_api=c.api)
-        time.sleep(15)  # give the platform a moment to route messages to the new address
-        reply = c.invoke(target, probe, wait_s=180)
+        print("target running; waiting 30s for it to register so messages can reach it (the relay also resends)...")
+        time.sleep(30)
+        reply = c.invoke(target, probe, wait_s=240)
         actual = (reply.get("texts") or [None])[0]
         ok = actual == expected
         step("independent_invocation", relay=reply.get("relay"), relay_cleanup=reply.get("relay_cleanup"),
@@ -83,7 +84,10 @@ def main():
         ev["observed"] = {"actual": actual, "behavioral_match": ok, "acked": reply.get("acked")}
         ev["result"] = "PASS" if ok else ("FAIL: no reply" if actual is None else "FAIL: wrong behaviour")
         if not ok:
-            ev["target_logs_tail"] = c.logs(target)[-3000:]
+            ev["target_logs_tail"] = c.logs(target)[-4000:]
+            ev["relay_logs_tail"] = reply.get("relay_logs_tail")
+            print("\n--- target agent logs (last lines) ---\n" + ev["target_logs_tail"][-1500:])
+            print("\n--- relay agent logs (last lines) ---\n" + str(reply.get("relay_logs_tail"))[-1500:])
     except agentverse.AgentverseError as e:
         ev["result"] = f"FAIL: {e}"
         step("api_error", error=str(e)[:400])

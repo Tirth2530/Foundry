@@ -53,6 +53,6 @@ def write_tests(request: str, skills, meter, events=None) -> dict:
             raise ValueError("examiner produced no valid cases")
         return {"cases": good, "dropped": dropped, "provider": r["provider"],
                 "independent": r["provider"] != skills.route("builder")}
-    out = recovery.call(go, provider=provider, events=events)
+    out = recovery.call(go, provider=provider, events=events, avoid=skills.route("builder"))
     cached.write_text(json.dumps(out, indent=1))
     return out

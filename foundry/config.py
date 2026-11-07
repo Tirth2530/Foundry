@@ -47,6 +47,9 @@ PROVIDERS = {
         "price_in": float(env("OPENAI_PRICE_IN", "1.25")),
         "price_out": float(env("OPENAI_PRICE_OUT", "10.0")),
         "supports_temperature": env("OPENAI_SUPPORTS_TEMPERATURE", "false") == "true",
+        # gpt-5 / o-series: low effort = faster, cheaper, and code output isn't starved by hidden reasoning
+        "reasoning_effort": env("OPENAI_REASONING_EFFORT",
+                                "low" if env("OPENAI_MODEL", "gpt-5").startswith(("gpt-5", "o")) else "") or None,
     },
     "meta": {
         "base_url": env("LLAMA_BASE_URL", "https://api.llama.com/compat/v1"),

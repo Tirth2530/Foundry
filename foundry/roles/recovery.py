@@ -6,13 +6,17 @@ import time
 from .. import config, llm
 
 
-def call(fn, *, provider: str, attempts: int = 3, events: list | None = None):
-    """Run fn(provider) with retries; on repeated provider failure switch model family."""
+def call(fn, *, provider: str, attempts: int = 3, events: list | None = None, avoid: str | None = None):
+    """Run fn(provider) with retries; on repeated provider failure switch model family. `avoid` (the
+    builder's family, for verifier roles) is only used as the very last resort."""
     tried: list[str] = []
-    order = [provider] + [p for p in config.FALLBACK_ORDER if p != provider]
+    order = [provider] + [p for p in config.FALLBACK_ORDER if p not in (provider, avoid)] + \
+        ([avoid] if avoid and avoid != provider else [])
     last = None
     for p in order:
-        if not llm.available(p) and p != provider:
+        if not llm.available(p):
+            if events is not None:
+                events.append({"recovery": "skip", "provider": p, "why": "no API key"})
             continue
         for a in range(attempts):
             try:

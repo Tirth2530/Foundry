@@ -40,7 +40,7 @@ def cmd_doctor(_):
             continue
         try:
             r = llm.chat([{"role": "user", "content": "Reply with the single word OK."}], provider=p, role="doctor",
-                         max_tokens=20)
+                         max_tokens=300)
             print(f"[ok] {p} ({c['model']}): {r['text'].strip()[:20]!r} {r['tokens_in']}+{r['tokens_out']} tokens")
         except Exception as e:  # noqa: BLE001
             ok = False

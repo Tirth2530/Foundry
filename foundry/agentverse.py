@@ -43,6 +43,25 @@ async def later(ctx, target):
     await send_next(ctx, target)
 
 
+answered, sends = set(), {}
+
+
+@agent.on_interval(period=20.0)
+async def resend(ctx: Context):
+    # a freshly started agent may not be resolvable yet: resend the current probe until it answers
+    for target, i in list(current.items()):
+        if (target, i) in answered:
+            continue
+        n = sends.get((target, i), 1)
+        if n >= 9:
+            continue
+        sends[(target, i)] = n + 1
+        p = next(x for x in PROBES if x["i"] == i)
+        ctx.logger.info(f"FOUNDRY_RELAY_RESEND {i} attempt {n + 1}")
+        await ctx.send(target, ChatMessage(timestamp=datetime.now(timezone.utc), msg_id=uuid4(),
+                                           content=[TextContent(type="text", text=p["send"])]))
+
+
 @agent.on_event("startup")
 async def go(ctx: Context):
     for target in list(queues):
@@ -55,6 +74,7 @@ async def on_chat(ctx: Context, sender: str, msg: ChatMessage):
     i = current.get(sender)
     if i is None:
         return
+    answered.add((sender, i))  # multi-part replies (text, then a card) are all recorded; resends stop
     for c in msg.content:
         t = getattr(c, "type", "")
         if t == "text":
@@ -70,6 +90,7 @@ async def on_chat(ctx: Context, sender: str, msg: ChatMessage):
 async def on_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
     if sender in current:
         ctx.logger.info(f"FOUNDRY_RELAY_ACK {current[sender]}")
+        answered.add((sender, "ack"))
 
 
 agent.include(protocol, publish_manifest=True)
@@ -248,7 +269,7 @@ class Client:
             return []
 
     # ------------------------------------------------------------ independent invocation
-    def invoke_many(self, probes: list[dict], wait_s: int = 180) -> dict:
+    def invoke_many(self, probes: list[dict], wait_s: int = 240) -> dict:
         """ONE throwaway relay agent sends every probe ({id, target, send}) over ACP (probes to the
         same agent go one at a time) and records the replies from the platform logs. These are
         real third-party calls to live agents. Returns {id: {texts, cards, acked, latency_s}}."""
@@ -278,6 +299,12 @@ class Client:
                     out[idx[i]["id"]][key].append(val)
             for i in _indexed(logs, "FOUNDRY_RELAY_ACK "):
                 out[idx[i]["id"]]["acked"] = True
+            if any(not r["texts"] and not r["cards"] for r in out.values()):
+                tail = "\n".join(_lines(logs)[-40:])[-4000:]
+                for r in out.values():
+                    if not r["texts"] and not r["cards"]:
+                        r["relay_logs_tail"] = tail
+                        r["resends"] = len([l for l in _lines(logs) if "FOUNDRY_RELAY_RESEND" in l])
         finally:
             cleanup = self.teardown([relay])
             for rec in out.values():

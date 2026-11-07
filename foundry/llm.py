@@ -73,7 +73,7 @@ def resolve(provider: str) -> tuple[str, bool]:
         return provider, False
     for p in config.FALLBACK_ORDER:
         if available(p):
-            return p, True
+            return p, True  # recovery.call orders fallbacks (and avoids the builder's family for verifiers)
     raise LLMError("No model API keys configured. Set OPENAI_API_KEY, LLAMA_API_KEY or ASI_ONE_API_KEY.")
 
 
@@ -89,7 +89,10 @@ def chat(messages: list[dict], *, provider: str, role: str, meter: CostMeter | N
     if temperature is not None and p["supports_temperature"]:
         body["temperature"] = temperature
     if used == "gpt":
-        body["max_completion_tokens"] = max_tokens
+        # reasoning models spend completion tokens thinking first; leave room and keep effort low
+        body["max_completion_tokens"] = max_tokens * 2 if p.get("reasoning_effort") else max_tokens
+        if p.get("reasoning_effort"):
+            body["reasoning_effort"] = p["reasoning_effort"]
     else:
         body["max_tokens"] = max_tokens
 
@@ -104,6 +107,9 @@ def chat(messages: list[dict], *, provider: str, role: str, meter: CostMeter | N
             if r.status_code == 400 and "temperature" in r.text and "temperature" in body:
                 body.pop("temperature")  # some models reject custom temperature
                 continue
+            if r.status_code == 400 and "reasoning_effort" in r.text and "reasoning_effort" in body:
+                body.pop("reasoning_effort")
+                continue
             if r.status_code == 400 and "max_completion_tokens" in r.text:
                 body["max_tokens"] = body.pop("max_completion_tokens")
                 continue
@@ -116,6 +122,12 @@ def chat(messages: list[dict], *, provider: str, role: str, meter: CostMeter | N
             data = r.json()
             msg = data["choices"][0]["message"]
             text = msg.get("content") or ""
+            if not text.strip():
+                last_err = f"{used} returned an empty reply (finish_reason={data['choices'][0].get('finish_reason')})"
+                if attempt < retries - 1:
+                    body[("max_completion_tokens" if "max_completion_tokens" in body else "max_tokens")] *= 2
+                    continue
+                raise LLMError(last_err)
             usage = data.get("usage") or {}
             tin = int(usage.get("prompt_tokens") or 0)
             tout = int(usage.get("completion_tokens") or 0)
