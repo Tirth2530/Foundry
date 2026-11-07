@@ -25,13 +25,21 @@ def _last_hash() -> str:
 
 
 def append(kind: str, **data) -> dict:
+    """Thread-safe AND process-safe (serve + evolve can run at the same time): an exclusive file lock
+    covers reading the last hash and writing the new record, so the chain can't fork."""
     with _lock:
         config.EVIDENCE.mkdir(parents=True, exist_ok=True)
-        rec = {"kind": kind, "t": time.strftime("%Y-%m-%dT%H:%M:%S"), **data, "prev": _last_hash()}
-        rec["hash"] = hashlib.sha256(json.dumps(rec, sort_keys=True, default=str).encode()).hexdigest()[:16]
-        with PATH.open("a") as f:
-            f.write(json.dumps(rec, default=str) + "\n")
-        return rec
+        with (config.EVIDENCE / ".ledger.lock").open("a") as lockf:
+            try:
+                import fcntl
+                fcntl.flock(lockf, fcntl.LOCK_EX)
+            except ImportError:  # Windows: thread lock only
+                pass
+            rec = {"kind": kind, "t": time.strftime("%Y-%m-%dT%H:%M:%S"), **data, "prev": _last_hash()}
+            rec["hash"] = hashlib.sha256(json.dumps(rec, sort_keys=True, default=str).encode()).hexdigest()[:16]
+            with PATH.open("a") as f:
+                f.write(json.dumps(rec, default=str) + "\n")
+            return rec
 
 
 def read(kind: str | None = None) -> list[dict]:
