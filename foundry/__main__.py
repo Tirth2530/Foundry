@@ -150,11 +150,20 @@ def cmd_serve(a):
     if config.NETWORK_MODE == "agentverse":
         # Role agents run as separate Agentverse mailbox agents (`python -m foundry serve-roles`); the Foreman
         # only knows their ADDRESSES, so every task and result is routed through Agentverse.
-        addrs = network.role_addresses()
-        network.install(agent, addrs)
+        remote_roles = network.agentverse_roles()
+        all_addr = network.role_addresses()
+        remote = {r: all_addr[r] for r in remote_roles}
+        local = network.build_roles(agent.address, only=[r for r in network.REGISTRY if r not in remote_roles])
+        network.install(agent, {**remote, **local})
         fm.Foreman(agent)
-        print(f"FOUNDRY Foreman {agent.address} -> {len(addrs)} role agents on Agentverse")
-        agent.run()
+        print(f"FOUNDRY Foreman {agent.address}")
+        print(f"  on Agentverse ({len(remote)}): " + ", ".join(remote))
+        print(f"  local ({len(local)}): " + ", ".join(local))
+        local_bureau = Bureau(port=config.FOREMAN_PORT + 1)
+        for r in local.values():
+            local_bureau.add(r)
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(asyncio.gather(agent.run_async(), local_bureau.run_async()))
         return
     roles = network.build_roles(agent.address)  # role agents accept tasks from the Foreman only
     network.install(agent, roles)
@@ -194,13 +203,15 @@ def cmd_serve_roles(_):
     rd.mkdir(parents=True, exist_ok=True)
     agents, ports = {}, {}
     for i, role in enumerate(network.REGISTRY):
+        if role not in network.agentverse_roles():
+            continue
         port = network.ROLE_PORT_BASE + i
         f = rd / f"{role}.md"
         f.write_text(network.role_readme(role, foreman))
         agents[role] = network.make_role_agent(role, {foreman}, port=port, mailbox=True, readme_path=str(f))
         ports[role] = port
     expected = network.role_addresses()
-    bad = [r for r, a in agents.items() if a.address != expected[r]]
+    bad = [r for r, a in agents.items() if a.address != expected[r]]  # noqa: E501
     if bad:
         raise SystemExit(f"address derivation mismatch for {bad}: the Foreman would not find them")
     print(f"FOUNDRY role agents (accept tasks only from Foreman {foreman}):")

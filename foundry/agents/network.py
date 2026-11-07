@@ -280,8 +280,15 @@ class Transport:
             time.sleep(d.get("delay_s", 2))
 
 
-def build_roles(foreman_address: str) -> dict:
-    return {role: make_role_agent(role, {foreman_address}) for role in REGISTRY}
+def agentverse_roles() -> list[str]:
+    """Roles hosted as Agentverse mailbox agents in FOUNDRY_NETWORK_MODE=agentverse (an Agentverse account has a
+    mailbox-agent limit, so the rest run locally next to the Foreman)."""
+    raw = config.env("FOUNDRY_AGENTVERSE_ROLES", "scout,architect,examiner,adversary,builder,integrator,runner")
+    return [r.strip() for r in raw.split(",") if r.strip() in REGISTRY]
+
+
+def build_roles(foreman_address: str, only: list | None = None) -> dict:
+    return {role: make_role_agent(role, {foreman_address}) for role in REGISTRY if only is None or role in only}
 
 
 def install(foreman: Agent, roles: dict) -> Transport:
