@@ -12,9 +12,13 @@
   history                    every patch FOUNDRY proposed, and what the gate decided
   rollback vNNNN             point CURRENT back to an earlier skill version
   claim job_xxxxxx           deploy a verified build into YOUR Agentverse account (CLAIM_AGENTVERSE_API_KEY)
+  passport job_xxxxxx        (re)issue the Proof Passport for a build -> runs/<job>/passport.json
+  passport-verify <file>     deterministic check of a passport against the files and the ledger (exit 1 if invalid)
   recheck job_xxxxxx         re-test whether a deployed agent is in the Agentverse search index
+  recover                    tear down any deployment left half-finished by a crash (confirmed by a 404)
   report                     write evidence/report.md (numbers for the pitch)
-  lint                       validate benchmark specs and the ledger hash chain
+  lint                       validate specs, manifest, cross-split leakage and the ledger hash chain (exit 1 on error)
+  bench-freeze               write bench/MANIFEST.json (sha256 + fingerprint per spec; final set locked once used)
   search "<what you need>"   RAW Agentverse search only: is the search API returning real agents? (no LLM)
   scout "<what you need>"    full Scout: search Agentverse, then live-test the top matches (reuse vs build)
 """
@@ -262,6 +266,36 @@ def cmd_recheck(a):
     sys.exit(0 if out["publication_status"] == "DISCOVERABLE" else 1)
 
 
+def cmd_passport(a):
+    from . import passport
+    path = passport.write(a.job)
+    pp = json.loads(path.read_text())
+    for k, v in passport.summary_rows(pp):
+        print(f"  {k:22s} {v}")
+    print(f"\nwritten: {path}")
+
+
+def cmd_passport_verify(a):
+    from pathlib import Path
+    from . import passport
+    problems = passport.validate(Path(a.path))
+    if problems:
+        print("PASSPORT INVALID:")
+        for p in problems:
+            print(f"  - {p}")
+        sys.exit(1)
+    pp = json.loads(Path(a.path).read_text())
+    print(f"PASSPORT VALID: {pp['passport_id']} verdict={pp['verdict']} code={pp['code']['system_sha256'][:16]} "
+          f"evidence files={len(pp['evidence'])} ledger anchor={pp['ledger_anchor']['hash']}")
+
+
+def cmd_recover(_):
+    from . import jobs
+    out = jobs.recover_all_publishes()
+    print(json.dumps(out, indent=1, default=str))
+    sys.exit(1 if any(o.get("cleanup_confirmed") is False for o in out) else 0)
+
+
 def cmd_report(_):
     from . import report
     print(report.write())
@@ -278,6 +312,20 @@ def cmd_lint(_):
     print(f"ledger chain {'intact' if ok else 'BROKEN at record ' + str(n)} ({n} records)")
     for split in bench.DIRS:
         print(f"  {split} content hash {bench.split_hash(split)}")
+    integ = bench.integrity()
+    print(f"integrity: {integ['counts']} (multi-agent {integ['multi_agent']}), "
+          f"promotion set evaluated {integ['promotion_set_evaluations']}x")
+    for w in integ["warnings"]:
+        print(f"  warning: {w}")
+    for e in integ["errors"]:
+        print(f"  ERROR: {e}")
+    sys.exit(1 if bad or integ["errors"] or not ok else 0)
+
+
+def cmd_bench_freeze(a):
+    from . import bench
+    m = bench.freeze(force_final=a.force_final)
+    print(f"froze {len(m['files'])} spec files -> bench/MANIFEST.json; split hashes {m['split_hashes']}")
 
 
 def main():
@@ -309,11 +357,18 @@ def main():
     r.add_argument("version")
     c = sub.add_parser("claim")
     c.add_argument("job")
+    pa = sub.add_parser("passport")
+    pa.add_argument("job")
+    pv = sub.add_parser("passport-verify")
+    pv.add_argument("path")
     rc = sub.add_parser("recheck")
     rc.add_argument("job")
     rc.add_argument("--wait", type=float, default=0, help="keep polling the search index for N seconds")
+    sub.add_parser("recover")
     sub.add_parser("report")
     sub.add_parser("lint")
+    bf = sub.add_parser("bench-freeze")
+    bf.add_argument("--force-final", action="store_true")
     se = sub.add_parser("search")
     se.add_argument("text")
     sc = sub.add_parser("scout")
@@ -321,7 +376,8 @@ def main():
     a = ap.parse_args()
     {"doctor": cmd_doctor, "gate1": cmd_gate1, "selftest": cmd_selftest, "build": cmd_build, "serve": cmd_serve,
      "evolve": cmd_evolve, "eval-final": cmd_eval_final, "history": cmd_history, "rollback": cmd_rollback,
-     "claim": cmd_claim, "learn": cmd_learn, "sandbox-build": cmd_sandbox_build, "report": cmd_report, "recheck": cmd_recheck, "lint": cmd_lint, "search": cmd_search,
+     "claim": cmd_claim, "learn": cmd_learn, "sandbox-build": cmd_sandbox_build, "report": cmd_report, "recheck": cmd_recheck,
+     "passport": cmd_passport, "recover": cmd_recover, "passport-verify": cmd_passport_verify, "lint": cmd_lint, "bench-freeze": cmd_bench_freeze, "search": cmd_search,
      "scout": cmd_scout}[a.cmd](a)
 
 

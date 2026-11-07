@@ -1,0 +1,150 @@
+{
+ "id": "d15_issue_desk_multi",
+ "title": "Three-agent issue desk: delegation, per-user state, idempotent filing, card selections",
+ "tags": [
+  "multi-agent",
+  "delegation",
+  "cross-agent-state",
+  "idempotency",
+  "card-selection"
+ ],
+ "request": "Build THREE agents. 'classifier' labels an issue title: if it contains 'crash' or 'exception' (case-insensitive) the label is bug; else if it contains 'slow' the label is performance; otherwise question. 'registry' stores issues PER USER (the entry agent tells it which user): each user's issues get ids I-1, I-2, ... in order of first filing, and filing a title that user already filed returns the existing id instead of creating a new one. 'intake' is the entry agent: for 'file <title>' it asks classifier for the label and registry for the id and replies 'Filed <id> as <label>' with a review card titled 'Close <id>?' whose Approve button has selection {\"action\":\"close\",\"id\":\"<id>\"} and whose Reject button has selection {\"action\":\"keep\",\"id\":\"<id>\"}. When the user sends {\"action\":\"close\",\"id\":\"X\"} reply 'Closed X' the first time and 'Already closed X' after that; for an id that user never filed reply 'Unknown issue X'. On {\"action\":\"keep\",\"id\":\"X\"} reply 'Kept X'.",
+ "topology": {
+  "agents": [
+   "intake",
+   "classifier",
+   "registry"
+  ],
+  "must_receive": [
+   "classifier",
+   "registry"
+  ]
+ },
+ "tests": [
+  {
+   "name": "file_close_retry",
+   "turns": [
+    {
+     "send": "file App crash on start",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "Filed I-1 as bug"
+      },
+      {
+       "type": "card",
+       "kind": "review"
+      }
+     ]
+    },
+    {
+     "send": "{\"action\": \"close\", \"id\": \"I-1\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Closed I-1"
+      },
+      {
+       "type": "text_not_contains",
+       "value": "Already"
+      }
+     ]
+    },
+    {
+     "send": "{\"action\": \"close\", \"id\": \"I-1\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Already closed I-1"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "dedupe_and_numbering",
+   "turns": [
+    {
+     "send": "file Search is slow",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "Filed I-1 as performance"
+      }
+     ]
+    },
+    {
+     "send": "file Search is slow",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Filed I-1 as performance"
+      },
+      {
+       "type": "text_not_contains",
+       "value": "I-2"
+      }
+     ]
+    },
+    {
+     "send": "file How do I log in",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Filed I-2 as question"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "unknown_close",
+   "turns": [
+    {
+     "send": "{\"action\": \"close\", \"id\": \"I-9\"}",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "Unknown issue I-9"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "keep",
+   "turns": [
+    {
+     "send": "file Null pointer Exception in parser",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "Filed I-1 as bug"
+      }
+     ]
+    },
+    {
+     "send": "{\"action\": \"keep\", \"id\": \"I-1\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Kept I-1"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

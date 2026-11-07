@@ -25,7 +25,7 @@ from uagents_core.contrib.protocols.payment import (
     CommitPayment, CompletePayment, Funds, RejectPayment, RequestPayment, payment_protocol_spec,
 )
 
-from .. import cards, config, ledger, llm, pipeline, skills as sk
+from .. import cards, config, jobs as jobs_mod, ledger, llm, pipeline, skills as sk
 from ..roles import livecheck, publisher, quartermaster, scout
 from . import payments
 
@@ -118,8 +118,17 @@ class Foreman:
                 self.jobs[j["job_id"]] = j
             except (ValueError, KeyError):
                 continue
+        for j in self.jobs.values():  # a paid tx survives restarts, so a replayed CommitPayment is idempotent
+            if j.get("paid_tx"):
+                self.paid_tx.add(j["paid_tx"])
+        try:
+            self.recovered = jobs_mod.recover(self.jobs, lambda job, **kw: self._update(job, **kw))
+        except Exception as e:  # noqa: BLE001 - recovery problems must not stop the agent from answering
+            self.recovered = [{"error": f"{type(e).__name__}: {e}"}]
 
     def _update(self, job: dict, **kw):
+        if "status" in kw:  # every status change is checked against the lifecycle table
+            jobs_mod.check_transition(job.get("status"), kw["status"])
         job.update(kw)
         d = config.RUNS / job["job_id"]
         d.mkdir(parents=True, exist_ok=True)
@@ -392,6 +401,8 @@ class Foreman:
         await ctx.send(sender, msg)
 
     async def reject(self, ctx, sender, job):
+        if job["status"] not in ("quoted", "awaiting_payment", "scouted", "reuse_offer"):
+            return await ctx.send(sender, chat(f"{job['job_id']} is {job['status']}; there is no open quote to reject."))
         self._update(job, status="cancelled")
         await ctx.send(sender, chat(f"Cancelled {job['job_id']}. Nothing was built or charged."))
 

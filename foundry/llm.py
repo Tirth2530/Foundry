@@ -153,6 +153,8 @@ class CostMeter:
             return round(sum(vals), 6) if vals else None
         return {"total_usd": self.total_usd, "tokens": self.tokens(), "by_role": self.by_role(),
                 "cap_usd": self.cap_usd,
+                "models": sorted(({"provider": c.get("provider"), "model": c.get("model")} for c in self.calls),
+                                 key=lambda d: (str(d["provider"]), str(d["model"]))),
                 # three kinds of cost, never blended (see docs/BUDGETS.md)
                 "estimated_usd": tot("estimated_usd"), "calculated_usd": tot("calculated_usd"),
                 "provider_reported_usd": tot("provider_usd"),

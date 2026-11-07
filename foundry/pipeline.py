@@ -154,6 +154,7 @@ def build(request: str, skills, *, budget_usd: float | None = None, job_id: str 
                 run = rpc("runner", "run", harness.run, agents=art["agents"], entry=art["entry"], cases=verify_cases)
                 verify_results = run["results"]
                 result["sandbox"] = run.get("sandbox")
+                result["runtime"] = {"uagents": run["raw"].get("uagents_version"), "python": run["raw"].get("python")}
                 audit = rpc("card_validator", "audit", card_validator.audit, raw=run["raw"])
                 names = [a["name"] for a in art["agents"]]
                 collab = topo.evaluate(run["raw"], names, art["entry"],
@@ -233,8 +234,23 @@ def build(request: str, skills, *, budget_usd: float | None = None, job_id: str 
     rpc("ledger", "append", ledger.append, kind="build", job_id=job_id, spec_id=spec_id, skills_version=skills.version,
                   status=result["status"], verify=result.get("verify"),
                   hidden={k: v for k, v in (result.get("hidden") or {}).items() if k != "failures"} or None,
-                  usd=result["cost"]["total_usd"], seconds=result["seconds"], attempts=len(result["attempts"]))
+                  usd=result["cost"]["total_usd"], seconds=result["seconds"], attempts=len(result["attempts"]),
+                  collaboration=(result.get("collaboration") or {}).get("status"),
+                  code_sha256=_code_sha(jd))
+    if hidden_tests is None and (jd / "final" / "agents").exists():
+        try:  # user builds get a Proof Passport (benchmark builds are summarised by the judge instead)
+            from . import passport
+            result["passport"] = str(passport.write(job_id, jd))
+        except Exception as e:  # noqa: BLE001 - a passport problem must never hide the build result
+            result["passport_error"] = f"{type(e).__name__}: {e}"
     return result
+
+
+def _code_sha(jd: Path) -> str | None:
+    if not (jd / "final" / "agents").exists():
+        return None
+    from .passport import code_digest
+    return code_digest(jd)["system_sha256"]
 
 
 def observed_vs_inferred(r: dict) -> dict:

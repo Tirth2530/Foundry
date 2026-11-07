@@ -178,8 +178,13 @@ def main(job_path: str) -> None:
         bureau.add(agents[spec["name"]])
 
     entry = job.get("entry") or job["agents"][0]["name"]
+    try:
+        from importlib.metadata import version as _v
+        uv = _v("uagents")
+    except Exception:  # noqa: BLE001
+        uv = None
     base = {"peers": peers, "entry": entry, "load_errors": load_errors, "traffic_tap": tap,
-            "receive_tap": rtap, "t0": t_start}
+            "receive_tap": rtap, "t0": t_start, "uagents_version": uv, "python": sys.version.split()[0]}
     windows: list = [None] * len(cases)
     inv = {v: k for k, v in peers.items()}
 

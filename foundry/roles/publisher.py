@@ -151,7 +151,17 @@ def publish(job: dict, smoke_case: dict | None, client: agentverse.Client | None
                   request=job["request"][:600], verify=job.get("verify"), failure=failure,
                   publication_status=status, checks=checks, cleanup_confirmed=cleanup_confirmed,
                   live_passed=live.get("passed"), live_latency_s=live.get("latency_s"))
+    _reissue_passport(jid)
     return out
+
+
+def _reissue_passport(jid: str) -> None:
+    try:
+        from .. import passport
+        if (config.RUNS / jid / "result.json").exists():
+            passport.write(jid)
+    except Exception:  # noqa: BLE001 - the publish record above is authoritative; passport is derived
+        pass
 
 
 def check_discovery(client, address: str, name: str, request: str, wait_s: float) -> dict:
@@ -178,4 +188,5 @@ def recheck(job_id: str, client: agentverse.Client | None = None, wait_s: float 
     p.write_text(json.dumps(out, indent=1, default=str))
     ledger.append("publish_recheck", job_id=job_id, entry=out["entry"], publication_status=out["publication_status"],
                   discovery=d.get("status"))
+    _reissue_passport(job_id)
     return out
