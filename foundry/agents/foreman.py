@@ -663,12 +663,22 @@ class Foreman:
             kw = dict(accepted_funds=[Funds(currency="USD", amount=f"{job['quote']['price_usd']:.2f}",
                                             payment_method="stripe")],
                       recipient=str(ctx.agent.address), description=f"FOUNDRY verified build {job['job_id']}",
-                      metadata={"stripe": co, "service": "foundry_build", "job_id": job["job_id"]})
-            try:
-                req = RequestPayment(**kw, deadline_seconds=1800, reference=job["job_id"])
-            except Exception:  # noqa: BLE001 - older protocol versions lack these fields
-                req = RequestPayment(**kw)
-            await ctx.send(sender, req)
+                      metadata={"stripe": {k: str(v) for k, v in co.items() if v is not None},  # protocol: str only
+                                "service": "foundry_build", "job_id": job["job_id"]})
+            req = None
+            for extra in (dict(deadline_seconds=1800, reference=job["job_id"]), dict(deadline_seconds=1800), {}):
+                try:
+                    req = RequestPayment(**kw, **extra)
+                    break
+                except Exception as e:  # noqa: BLE001 - protocol versions differ; never crash the approval
+                    ctx.logger.warning(f"RequestPayment variant rejected: {str(e)[:200]}")
+            if req is not None:
+                await ctx.send(sender, req)
+            elif not co.get("url"):  # no in-chat checkout and no link: never leave the user stuck
+                self._update(job, status="quoted")
+                await ctx.send(sender, chat("The payment card couldn't be shown here, so this build runs in demo "
+                                            "mode with no charge."))
+                return await self.start_build(ctx, sender, job)
             ledger.append("payment_requested", job_id=job["job_id"], usd=job["quote"]["price_usd"],
                           variant=co.get("variant"))
             asyncio.get_running_loop().create_task(self._watch_payment(sender, job))
