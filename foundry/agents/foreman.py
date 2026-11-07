@@ -85,6 +85,7 @@ class Foreman:
         self.cancels: dict = {}  # job_id -> threading.Event checked before every paid stage / model call
         self.convos: dict = {}   # sender -> [{"role","content"}]: the conversation the concierge reasons over
         self.plans: dict = {}    # plan_id -> {"sender", "plan"}: drafted with the user, built only on confirm
+        self.sessions: dict = {}  # sender -> the context of their latest message (carries their ASI:One session)
         self._load_jobs()
 
         chat_proto = Protocol(spec=chat_protocol_spec)
@@ -108,6 +109,7 @@ class Foreman:
             started = any(isinstance(c, StartSessionContent) for c in msg.content)
             ctx.logger.info(f"chat from {sender[:14]}...: {text[:240]!r}")
             self.remember(sender, "user", _describe_user_turn(text))
+            self.sessions[sender] = ctx  # replies sent later (scout, quote, build result) stay in this session
             try:
                 await self.route(_Recorder(ctx, self), sender, text, started)
             except Exception as e:  # noqa: BLE001 - never leave the user without a reply
@@ -168,7 +170,16 @@ class Foreman:
     def later(self, to: str, msg: ChatMessage):
         """Send from a worker thread into the agent's event loop."""
         self.remember_out(to, msg)
-        asyncio.run_coroutine_threadsafe(self.ctx.send(to, msg), self.loop)
+        c = self.sessions.get(to) or self.ctx  # same session as the user's chat, or ASI:One may not show it
+        fut = asyncio.run_coroutine_threadsafe(c.send(to, msg), self.loop)
+
+        def _log(f):
+            try:
+                st = f.result()
+                self.ctx.logger.info(f"sent update to {to[:14]}... ({getattr(st, 'status', 'sent')})")
+            except Exception as e:  # noqa: BLE001
+                self.ctx.logger.warning(f"could not deliver update to {to[:14]}...: {e}")
+        fut.add_done_callback(_log)
 
     # ------------------------------------------------------------ conversation memory
     def history_of(self, sender: str) -> list[dict]:
