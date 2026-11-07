@@ -112,3 +112,41 @@ def test_pipeline_over_the_agent_network_wire(sandbox, monkeypatch):
         assert hop in hops, hops
     assert network._recovery_decide("builder", "budget cap", 1)["action"] == "fail"
     assert network._recovery_decide("builder", "timeout", 1)["action"] == "retry"
+
+
+def test_conversation_reuse_path(sandbox, monkeypatch):
+    from foundry.roles import scout
+    monkeypatch.setattr(config, "AGENTVERSE_API_KEY", "x")
+    found = {"found": True, "candidate": {"id": "foundry:job_abc123", "source": "foundry_catalog",
+                                          "address": "agent1qcatalog", "job_id": "job_abc123"},
+             "live": {"passed": True, "basis": "its original independent test", "latency_s": 8.0, "texts": ["VALID"]},
+             "match": {"confidence": 0.92, "reason": "same task", "gaps": []}}
+    monkeypatch.setattr(scout, "find", lambda **kw: found)
+    agent = Agent(name="foundry", seed="t2")
+    fm.Foreman(agent)
+    on_chat = agent.handlers[ChatMessage]
+
+    async def scenario():
+        ctx = Ctx(agent)
+        for h in agent.events["startup"]:
+            await h(ctx)
+
+        async def say(text):
+            await on_chat(ctx, "user2", ChatMessage(timestamp=datetime.now(timezone.utc), msg_id=uuid4(),
+                                                    content=[TextContent(type="text", text=text)]))
+        await say("Build an ISBN-13 checker agent that replies VALID or INVALID")
+        assert "Scout" in _texts(ctx.sent)
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            if any(c["card_kind"] == "review" for c in _cards(ctx.sent)):
+                break
+        offer = _cards(ctx.sent)[-1]
+        assert cards.validate(offer) == [] and "already does this" in offer["card_payload"]
+        jid = json.loads(offer["card_payload"])["approve_cta"]["selection"]["job_id"]
+        await say(json.dumps({"action": "reuse", "job_id": jid}))
+        done = _cards(ctx.sent)[-1]
+        assert done["card_kind"] == "detail" and cards.validate(done) == [] and "agent1qcatalog" in done["card_payload"]
+        await say(json.dumps({"action": "reuse", "job_id": jid}))
+        assert "reused" in _texts(ctx.sent[-1:])
+
+    asyncio.run(scenario())

@@ -1,5 +1,6 @@
 {
   "routing": {
+    "scout": "asi",
     "foreman": "asi",
     "architect": "asi",
     "builder": "gpt",

@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import json
 
-from .. import agentverse, config, dsl, ledger
+from .. import agentverse, config, ledger
+from . import livecheck
 
 BADGES = ("![tag:innovationlab](https://img.shields.io/badge/innovationlab-3D8BD3)\n"
           "![tag:hackathon](https://img.shields.io/badge/hackathon-5F43F1)\n")
@@ -34,18 +35,11 @@ def publish(job: dict, smoke_case: dict | None, client: agentverse.Client | None
             job["request"][:180])
         client.start(addrs[a["name"]])
     entry_addr = addrs[build["entry"]]
-    live = {"skipped": True}
-    if smoke_case:
-        turn = smoke_case["turns"][0]
-        live = client.invoke(entry_addr, turn["send"])
-        rec = {"replies": [{"texts": live["texts"], "metadata": [], "end_session": False}] if live["texts"] else [],
-               "acked": live["acked"]}
-        checks = [c for c in turn.get("checks", []) if c["type"] in ("text_contains", "text_regex", "text_number", "ack")]
-        live["checks"] = dsl.evaluate_turn({"send": turn["send"], "checks": checks}, rec)
-        live["passed"] = all(c["ok"] for c in live["checks"])
+    live = livecheck.run(client, entry_addr, smoke_case)
     out = {"job_id": job["job_id"], "agents": addrs, "entry": entry_addr, "readme_set": profile,
            "profile_url": f"https://agentverse.ai/agents/details/{entry_addr}/profile", "live_invocation": live}
     (config.RUNS / job["job_id"] / "publish.json").write_text(json.dumps(out, indent=1))
-    ledger.append("publish", job_id=job["job_id"], agents=addrs,
+    ledger.append("publish", job_id=job["job_id"], agents=addrs, entry=entry_addr, request=job["request"][:600],
+                  verify=job.get("verify"),
                   live_passed=live.get("passed"), live_latency_s=live.get("latency_s"))
     return out

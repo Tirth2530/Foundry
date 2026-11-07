@@ -51,6 +51,10 @@ def sandbox(tmp_path, monkeypatch):
             knows = "approve_cta" in sys_txt
             text = "```python name=main entry\n# " + ("approve_cta" if knows else "buttons") + \
                    "\nChatAcknowledgement\nagent.include(p)\n```"
+        elif role == "scout":
+            import re as _re
+            ids = _re.findall(r"id=(\S+)", messages[1]["content"])
+            text = json.dumps({"best": ids[0] if ids else None, "confidence": 0.9, "reason": "same job", "gaps": []})
         elif role == "miner":
             text = '{"root_cause":"review cards use wrong keys","generalizes_because":"every review card"}'
         elif role == "evolver":

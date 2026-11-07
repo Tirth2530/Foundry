@@ -21,7 +21,7 @@ from uagents import Agent, Context
 from .. import config, ledger, llm, pipeline, skills as sk
 from ..harness import run as harness
 from ..roles import (adversary, architect, builder, card_validator, examiner, integrator, judge, miner,
-                     publisher, quartermaster)
+                     publisher, quartermaster, scout)
 from .messages import RoleResult, RoleTask
 
 
@@ -51,6 +51,7 @@ def _miner_mine(job_ids: list, **kw):
 
 # role -> op -> (callable, needs_llm_context)
 REGISTRY = {
+    "scout": {"find": (scout.find, True)},
     "architect": {"plan": (architect.plan, True)},
     "examiner": {"write_tests": (examiner.write_tests, True)},
     "adversary": {"cases": (adversary.cases, True)},
@@ -68,7 +69,7 @@ REGISTRY = {
     "evolver": {"round": (_evolve_round, False)},
 }
 
-TIMEOUTS = {"runner": 900, "builder": 400, "publisher": 400, "judge": 7200, "evolver": 14400}
+TIMEOUTS = {"scout": 400, "runner": 900, "builder": 400, "publisher": 400, "judge": 7200, "evolver": 14400}
 
 
 def execute(task: dict) -> dict:

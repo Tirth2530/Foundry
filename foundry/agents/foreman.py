@@ -25,8 +25,8 @@ from uagents_core.contrib.protocols.payment import (
     CommitPayment, CompletePayment, Funds, RejectPayment, RequestPayment, payment_protocol_spec,
 )
 
-from .. import cards, config, ledger, pipeline, skills as sk
-from ..roles import publisher, quartermaster
+from .. import cards, config, ledger, llm, pipeline, skills as sk
+from ..roles import publisher, quartermaster, scout
 from . import payments
 
 JOB_RE = re.compile(r"job_[0-9a-f]{6}")
@@ -133,10 +133,12 @@ class Foreman:
             req = str(sel.get("request", "")).strip()
             budget = sel.get("budget")
             return await self.quote(ctx, sender, req, budget)
-        if action in ("approve_quote", "reject_quote", "publish", "evidence") and jid not in self.jobs:
+        if action in ("approve_quote", "reject_quote", "publish", "evidence", "reuse", "build_new") and jid not in self.jobs:
             return await ctx.send(sender, chat(f"I couldn't find job {jid}. Say 'status' to see your jobs."))
         handlers = {
             "approve_quote": lambda: self.approve(ctx, sender, self.jobs[jid]),
+            "reuse": lambda: self.reuse(ctx, sender, self.jobs[jid]),
+            "build_new": lambda: self.build_new(ctx, sender, self.jobs[jid]),
             "reject_quote": lambda: self.reject(ctx, sender, self.jobs[jid]),
             "publish": lambda: self.publish(ctx, sender, self.jobs[jid]),
             "evidence": lambda: self.evidence(ctx, sender, self.jobs[jid]),
@@ -159,6 +161,10 @@ class Foreman:
         if jid:
             if any(w in low for w in ("reject", "cancel", "decline")):
                 return "reject_quote", jid
+            if "use this agent" in low or "reuse" in low or "use existing" in low:
+                return "reuse", jid
+            if "build a new" in low or "build new" in low:
+                return "build_new", jid
             if "publish" in low or "deploy" in low:
                 return "publish", jid
             if "evidence" in low or "detail" in low or "proof" in low:
@@ -195,18 +201,28 @@ class Foreman:
         if len(request) < 15:
             return await self.welcome(ctx, sender)
         v = sk.load()
-        q = await asyncio.to_thread(pipeline.rpc, "quartermaster", "quote", lambda request, version:
-                                    quartermaster.quote(request, sk.load(version)), request=request, version=v.version)
+        if not (scout.catalog() or config.AGENTVERSE_API_KEY):
+            _, msg = await asyncio.to_thread(self._make_quote, sender, request, budget, v, None)
+            return await ctx.send(sender, msg)
+        await ctx.send(sender, chat("Before building anything, my Scout is checking whether an agent that already does "
+                                    "this exists, and if so, re-testing it live. Nothing is reused on the strength of "
+                                    "a README or a search ranking."))
+        threading.Thread(target=self._scout_worker, args=(sender, request, budget, v), daemon=True).start()
+
+    def _make_quote(self, sender, request, budget, v, note, job=None):
+        """Create (or refresh) a job with a Quartermaster quote. Returns (job, ChatMessage)."""
+        q = pipeline.rpc("quartermaster", "quote", lambda request, version: quartermaster.quote(request, sk.load(version)),
+                         request=request, version=v.version)
         if budget:
             try:
                 q["cap_usd"] = round(min(float(budget), max(q["cap_usd"], 0.05)), 2)
             except (TypeError, ValueError):
                 pass
-        jid = pipeline.new_job_id()
-        job = {"job_id": jid, "sender": sender, "request": request, "quote": q, "status": "quoted",
-               "created": time.time(), "skills_version": v.version}
-        self.jobs[jid] = job
-        self._update(job)
+        if job is None:
+            job = {"job_id": pipeline.new_job_id(), "sender": sender, "request": request, "created": time.time()}
+            self.jobs[job["job_id"]] = job
+        jid = job["job_id"]
+        self._update(job, quote=q, status="quoted", skills_version=v.version)
         pay = "Stripe test checkout" if payments.enabled() else "demo mode (no charge)"
         md = cards.review(f"Build quote · {jid}", [
             ("Request", request[:160] + ("…" if len(request) > 160 else "")),
@@ -218,7 +234,74 @@ class Foreman:
             ("Hosting & test compute", f"{q['hosting']} · {q['test_compute']}"),
         ], ("Approve & build", {"action": "approve_quote", "job_id": jid}),
             ("Cancel", {"action": "reject_quote", "job_id": jid}))
-        await ctx.send(sender, chat(f"Here's my quote for {jid}. Nothing runs until you approve.", md))
+        lead = (note + " ") if note else ""
+        return job, chat(f"{lead}Here's my quote for {jid}. Nothing runs until you approve.", md)
+
+    def _scout_worker(self, sender, request, budget, v):
+        try:
+            res = pipeline.rpc("scout", "find", scout.find, skills=v, meter=llm.CostMeter(cap_usd=0.30), events=[],
+                               request=request)
+        except Exception as e:  # noqa: BLE001 - discovery is optional; building is always available
+            res = {"found": False, "error": f"{type(e).__name__}: {e}"}
+        if res.get("found"):
+            c, live = res["candidate"], res["live"]
+            job = {"job_id": pipeline.new_job_id(), "sender": sender, "request": request, "created": time.time()}
+            self.jobs[job["job_id"]] = job
+            self._update(job, status="reuse_offer", scout=res, budget=budget)
+            src = "FOUNDRY verified catalog" if c["source"] == "foundry_catalog" else \
+                "Agentverse search (third-party listing, verified by me just now)"
+            md = cards.review("An existing agent already does this", [
+                ("Agent", c.get("name") or c.get("job_id") or c["address"][:24]),
+                ("Source", src),
+                ("Address", c["address"]),
+                ("Live re-check", f"PASS just now in {live.get('latency_s', '?')}s against {live.get('basis')}"),
+                ("Match", f"{float(res['match'].get('confidence') or 0):.0%}: {str(res['match'].get('reason'))[:160]}"),
+                ("Possible gaps", ", ".join(res["match"].get("gaps") or []) or "none found"),
+                ("Cost to reuse", "$0 build cost"),
+            ], ("Use this agent", {"action": "reuse", "job_id": job["job_id"]}),
+                ("Build a new one", {"action": "build_new", "job_id": job["job_id"]}))
+            return self.later(sender, chat("Found one, and it passed a live re-check just now. Use it, or build new?", md))
+        _, msg = self._make_quote(sender, request, budget, v, self._scout_note(res))
+        self.later(sender, msg)
+
+    @staticmethod
+    def _scout_note(res: dict) -> str:
+        if res.get("error"):
+            return f"Scout couldn't finish ({res['error'][:120]}), so I'll quote a fresh build."
+        c, live = res.get("candidate"), res.get("live") or {}
+        if c and live.get("passed") is False:
+            bad = next((x for x in live.get("checks", []) if not x["ok"]), {})
+            return (f"Scout found {c['address'][:22]}… ({c['source']}) that looks like it does this, but it FAILED a live "
+                    f"re-check ({bad.get('code', 'no reply')}: {str(bad.get('detail', ''))[:120]}). I won't reuse it, "
+                    "so I'll build a verified one.")
+        if c and live.get("skipped"):
+            return "Scout found a possible match but couldn't re-test it live, so I won't reuse it unverified."
+        n = res.get("considered", {})
+        return (f"No existing agent matched (checked {n.get('catalog', 0)} verified catalog entries; Agentverse "
+                f"search: {res.get('search_note', 'n/a')}).")
+
+    async def reuse(self, ctx, sender, job):
+        if job["status"] != "reuse_offer":
+            return await ctx.send(sender, chat(f"{job['job_id']} is {job['status']}."))
+        c, live = job["scout"]["candidate"], job["scout"]["live"]
+        self._update(job, status="reused")
+        ledger.append("reuse", job_id=job["job_id"], address=c["address"], source=c["source"],
+                      live_passed=live.get("passed"))
+        md = cards.detail(f"Use this agent · {job['job_id']}", [
+            ("Address", c["address"]),
+            ("Profile", f"https://agentverse.ai/agents/details/{c['address']}/profile"),
+            ("Why it's trusted", f"passed {live.get('basis')} in a live call (reply in {live.get('latency_s', '?')}s)"),
+            ("Reply it gave", (live.get("texts") or [""])[0][:200]),
+            ("Use it", "@mention it in ASI:One or open its profile"),
+        ], [])
+        await ctx.send(sender, chat("Done. No build needed, and nothing was charged.", md))
+
+    async def build_new(self, ctx, sender, job):
+        if job["status"] != "reuse_offer":
+            return await ctx.send(sender, chat(f"{job['job_id']} is {job['status']}."))
+        _, msg = await asyncio.to_thread(self._make_quote, sender, job["request"], job.get("budget"), sk.load(),
+                                         "OK, building a new one.", job)
+        await ctx.send(sender, msg)
 
     async def reject(self, ctx, sender, job):
         self._update(job, status="cancelled")

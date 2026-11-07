@@ -25,7 +25,7 @@ BASELINE = "v0000"
 MAX_LESSON_CHARS = 1800
 PATCH_KINDS = {"lesson_add", "lesson_edit", "lesson_remove", "config"}
 CONFIG_KEYS = {"routing", "tools", "repair_budget"}
-ROLES = {"architect", "builder", "repair", "examiner", "adversary", "miner", "evolver", "foreman"}
+ROLES = {"scout", "architect", "builder", "repair", "examiner", "adversary", "miner", "evolver", "foreman"}
 TOOLS = {"preflight_static", "run_examiner_tests", "selection_json_probe", "include_reply_text"}
 
 

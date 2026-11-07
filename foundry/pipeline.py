@@ -58,7 +58,7 @@ def harness_failures(results):
 #          model-usage records, which are merged into this job's cost meter.
 TRANSPORT = None
 
-LLM_ROLES = {"architect", "examiner", "adversary", "builder"}
+LLM_ROLES = {"scout", "architect", "examiner", "adversary", "builder"}
 
 
 def rpc(role: str, op: str, fn, *, skills=None, meter=None, events=None, **kw):

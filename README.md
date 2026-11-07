@@ -9,6 +9,11 @@ verifier also covers **Trust but Verify**.
 Coding agents can already generate agents. But generated agents fail silently (ASI:One drops a card with one wrong
 key), and the systems that build them rarely learn from those failures. FOUNDRY does three things:
 
+0. **Reuses before it builds.** A Scout checks FOUNDRY's own catalog of agents it has verified, plus Agentverse
+   search as an optional hint (the search API isn't production-ready, so it's never relied on). The best match must
+   pass a test **live, right now** before it's offered: catalog agents are re-run against their original
+   independent test, and third-party agents against a test written from *your* request. Agents that fail their
+   claim are recorded and never recommended.
 1. **Builds** real Fetch.ai agents and multi-agent systems from a request in ASI:One. A Quartermaster quotes the cost
    and enforces a spend cap first.
 2. **Proves** they work. Acceptance tests are written by a *different model family* (Meta Llama) from the request
@@ -20,11 +25,12 @@ key), and the systems that build them rarely learn from those failures. FOUNDRY 
    promotion set with zero regressions**. Otherwise it is rolled back. A separate **final set** stays untouched until
    the end, and every time it's opened is recorded in a hash-chained ledger.
 
-## The 15 agents
+## The 16 agents
 
 | Agent | Job | Trust boundary |
 |---|---|---|
 | **Foreman** | ASI:One front door: ACP, interactive cards, Payment Protocol | only agent users talk to |
+| Scout (ASI:One LLM) | finds existing agents (verified catalog first, search as a hint) and re-tests the best one live | reuse only after a live pass |
 | Quartermaster | quote from measured history, hard spend cap, actual vs quoted | prices and caps every job |
 | Architect (ASI:One LLM) | smallest system design | advisory only, marked *inferred* |
 | Builder (GPT) | writes and repairs code with the current skill version | never sees tests |
@@ -60,14 +66,14 @@ cp .env.example .env                                        # then fill in the k
 ## Run it: gates first, then the show
 
 ```bash
-python -m pytest -q tests          # 13 offline tests, $0: validators, pipeline, evolution, gate, rollback, chat flow
+python -m pytest -q tests          # 18 offline tests, $0: validators, pipeline, evolution, gate, rollback, chat flow
 python -m foundry doctor           # packages + a 1-token call to each model + Agentverse key check
 python -m foundry gate1            # GATE 1: create + deploy + independently invoke a new hosted agent  -> evidence/gate1.json
 python -m foundry selftest         # GATE 2: the runner catches real defects in a known agent (no LLM)  -> evidence/gate2_selftest.json
 python -m foundry build "Base64 tool. 'encode <text>' replies 'base64: <encoded>'..."   # one real verified build
 python -m foundry evolve --rounds 3   # GATE 3: self-improvement against the sealed promotion set
 python -m foundry history          # every patch, the numbers, promoted or rolled back
-python -m foundry serve            # the 15-agent network; Foreman goes live for ASI:One
+python -m foundry serve            # the 16-agent network; Foreman goes live for ASI:One
 ```
 
 **Connect the Foreman to ASI:One (once):** `serve` prints an *Agent inspector* link. Open it, click **Connect →
@@ -81,6 +87,8 @@ computed from the ledger.
 ## What to say in ASI:One
 - "Build an agent that converts km and mi and asks with a form card when the unit is missing" → quote → approve →
   live progress → verified card → **Publish** → live third-party call.
+- Ask for something FOUNDRY has already published → the Scout offers the existing agent after re-testing it live
+  (**Use this agent** for $0, or **Build a new one**).
 - "history" → carousel of every self-change, with promotion-set scores, including rejected ones.
 - "evolve" → runs one evolution round and reports the decision.
 - "rollback v0001" → move to an earlier skill version.
