@@ -247,7 +247,7 @@ def cmd_search(a):
 def cmd_scout(a):
     from . import llm, skills as sk
     from .roles import scout
-    res = scout.find(a.text, sk.load(), llm.CostMeter(cap_usd=0.5), [])
+    res = scout.find(a.text, sk.load(), llm.new_meter(0.5, name="scout"), [])
     print(f"search: {res['search_note']}  queries={res['search'].get('queries')}")
     for e in res["search"].get("errors", []):
         print(f"  search error: {e}")

@@ -50,7 +50,7 @@ Agentverse can already generate an agent from a prompt. FOUNDRY adds what a gene
 Line to remember: *"Other AI systems build agents. FOUNDRY builds agents, learns from its own failures, and proves
 it's becoming a better engineer."*
 
-## The 16 agents
+## The agents (each role is its own uAgent; role agents accept tasks from the Foreman only)
 
 | Agent | Job | Trust boundary |
 |---|---|---|
@@ -87,91 +87,116 @@ cp .env.example .env                                        # then fill in the k
 | `LLAMA_API_KEY` | https://llama.developer.meta.com → API keys. If your Meta credits are on another OpenAI-compatible host, set `LLAMA_BASE_URL` and `LLAMA_MODEL` |
 | `FOUNDRY_SEED` | any long random string; this is the Foreman's identity, so keep it secret and stable |
 | `STRIPE_*` (optional) | https://dashboard.stripe.com/test/apikeys (test mode). Without these, FOUNDRY runs in demo mode with no charge |
+| `FOUNDRY_SANDBOX` | **required**: `docker` (after `sandbox-build`; mandatory for sealed sets) or `process` (dev only). No default |
+| `FOUNDRY_PROJECT_CAP_USD` | total model spend ever allowed (restart-safe); see `.env.example` for provider / learn caps |
+
+## Evidence status (read this first)
+
+This repository contains **no live run evidence** (`evidence/` is empty). Everything below that says "tested" refers
+to the levels in this table; nothing scripted or mocked is presented as a live result.
+
+| Level | What runs | Where | Status in this repo |
+|---|---|---|---|
+| 1. Offline, scripted | real FOUNDRY control logic; model + runner replaced by scripts; Agentverse HTTP faked | `pytest` (stubbed uAgents) | **107 passed** |
+| 2. Real uAgents | real runtime, real sandboxed runner, real ACP messages, real traffic taps | `tests/test_real_engine.py`, `selftest` | needs `pip install -r requirements.txt`; **not run here** |
+| 3. Real models | GPT / Llama / ASI:One calls with metered spend | `build`, `learn`, `evolve` | needs keys; **not run** |
+| 4. Agentverse live | deploy, live third-party ACP call, search-index discovery, confirmed teardown | `gate1`, `build --publish`, `recheck` | needs key; **not run** |
+| 5. ASI:One end to end | a person in ASI:One drives quote → build → passport → publish → reuse | `serve` + asi1.ai | **not run** |
 
 ## Run it: gates first, then the show
 
 ```bash
-python -m pytest -q tests          # offline + real-engine tests, $0: validators, pipeline, evolution, gate, rollback, chat flow
-python -m foundry doctor           # packages + a 1-token call to each model + Agentverse key check
-python -m foundry gate1            # GATE 1: create + deploy + independently invoke a new hosted agent  -> evidence/gate1.json
-python -m foundry sandbox-build    # Docker sandbox for generated code (do this before evolve)
-python -m foundry selftest         # GATE 2: the runner catches real defects in a known agent (no LLM)  -> evidence/gate2_selftest.json
-python -m foundry build "Base64 tool. 'encode <text>' replies 'base64: <encoded>'..."   # one real verified build
-python -m foundry evolve --estimate --dev-limit 7      # what one round will cost, before spending anything
-python -m foundry evolve --rounds 1 --dev-limit 7 --max-usd 15   # GATE 3: one affordable round first
-python -m foundry learn job_xxxxxx # live: one build's caught defects -> one skill change -> sealed gate decides
-python -m foundry history          # every patch, the numbers, promoted or rolled back
-python -m foundry serve            # the 16-agent network; Foreman goes live for ASI:One
+python -m pytest -q tests          # levels 1-2 (level 2 auto-skips without the real uagents package)
+python -m foundry doctor           # packages, 1-token call per model, Agentverse API (same resolution as deploy), sandbox
+python -m foundry sandbox-build    # Docker sandbox for generated code (FOUNDRY_SANDBOX=docker)
+python -m foundry gate1            # GATE 1: create + deploy + independently invoke + confirmed teardown (exit 1 on fail)
+python -m foundry selftest         # GATE 2: runner catches real defects, observes a real 2-agent hand-off (exit 1 on fail)
+python -m foundry lint             # specs, bench/MANIFEST.json, cross-split leakage, ledger chain (exit 1 on error)
+python -m foundry build "<request>" --budget 2 [--publish]   # one verified build -> runs/<job>/passport.json
+python -m foundry passport-verify runs/<job>/passport.json  # deterministic re-check against files + ledger
+python -m foundry trace <job>      # ASI:One intent -> roles -> sandbox -> release gate -> publisher -> live result
+python -m foundry recheck <job> --wait 300   # DEPLOYED -> DISCOVERABLE once Agentverse search returns the agent
+python -m foundry recover          # tear down a deployment left half-finished by a crash (confirmed by a 404)
+python -m foundry learn <job>      # one build's caught defects -> one skill change -> sealed promotion gate
+python -m foundry evolve --estimate --dev-limit 7 && python -m foundry evolve --rounds 1 --dev-limit 7 --max-usd 15
+python -m foundry history          # every patch, promoted or rejected, with numbers
+python -m foundry serve            # the agent network; Foreman goes live for ASI:One
 ```
+The full self-improvement protocol (Stages A–E, equal-budget comparison) is in `docs/EXPERIMENT.md`. The
+judge-demo application is specified in `docs/SHOWCASE.md` (not built yet).
 
 **Connect the Foreman to ASI:One (once):** `serve` prints an *Agent inspector* link. Open it, click **Connect →
 Mailbox**, then in Agentverse give the agent a handle (for example `@foundry`), an avatar, and paste
 `README_AGENT.md` as its README. Chat with it from https://asi1.ai.
 
-**At the end (run once):** `python -m foundry eval-final --repeats 2` compares the baseline `v0000`, the evolved
-version, and (if evolution changed models or budget) a lessons-only arm, on the untouched final set with the same
-budget cap per build. Then `python -m foundry report` writes `evidence/report.md` with all numbers,
-computed from the ledger.
+**At the end (run once):** `python -m foundry eval-final --repeats 3` compares A baseline `v0000`, B lessons-only
+and C full evolved on the untouched final set (same tasks, tests and $/build cap). `python -m foundry report` writes
+`evidence/report.md` from the ledger.
 
 ## What to say in ASI:One
-- "Build an agent that converts km and mi and asks with a form card when the unit is missing" → quote → approve →
-  live progress → verified card → **Publish** → live third-party call.
-- "find an agent that checks ISBN-13 numbers" → Agentverse audit carousel: each match's listing stats vs what it
-  actually did when called.
-- Ask for something FOUNDRY has already published → the Scout offers the existing agent after re-testing it live
-  (**Use this agent** for $0, or **Build a new one**).
-- "history" → carousel of every self-change, with promotion-set scores, including rejected ones.
-- "evolve" → runs one evolution round and reports the decision.
-- "scoreboard" → baseline vs evolved, cost per build, changes proposed, promoted and rolled back.
-- "rollback v0001" → move to an earlier skill version.
+- "Build an agent that converts km and mi and asks with a form card when the unit is missing" → capability
+  proposal card (A) → approve → live progress → result → **Proof Passport** card (B) → Approve publication →
+  live third-party call → published (or "deployed, not yet discoverable").
+- "permissions job_xxxxxx" · "cancel job_xxxxxx" · "passport job_xxxxxx" · "recheck job_xxxxxx"
+- "find an agent that checks ISBN-13 numbers" → Agentverse audit carousel: listing stats vs what it did when called.
+- "Teach FOUNDRY from this build" → **evolution verdict** card (C): failure, change, held-out comparison, transfer,
+  equal budget, decision, with Compare versions / history / Roll back (admin).
+- "history" · "scoreboard" · "evolve" (admin) · "rollback v0001" (admin)
 
-## Integrity and safety (audited)
-- **Release gate:** a build is `verified` only if, on the FINAL artifact, every independent test passed, the static
-  gate is clean, every card is valid and nothing failed to load. Tool settings can't skip any of it.
-- **The verifier can't be weakened by evolution:** the static gate and independent tests are locked on, and evolution
-  may not re-route the Examiner/Adversary to the builder's model family.
-- **Sandbox:** generated code runs with an EMPTY environment (no API keys), in isolated mode (FOUNDRY not importable),
-  in a temp dir with CPU/file limits. With `python -m foundry sandbox-build` it runs in Docker instead: no network,
-  read-only root, 768MB, 1 CPU, all capabilities dropped, non-root, only the runner and job file mounted (the sealed
-  tests are not reachable). The Integrator also statically forbids files, env, eval/exec and os/sys/subprocess.
-  **Build the Docker sandbox before running `evolve`.**
-- **Publish gate (transactional):** every agent must report `running` on Agentverse and the live entry agent
-  must pass an independent test with a real output assertion. Any failure (an exception mid-deploy, an agent that
-  never starts, a failed live check) tears down everything that publish created. The result records which
-  stop/delete calls were confirmed, and the build never enters the reuse catalog.
-- **Real collaboration, not just a claimed one:** the sandbox records every message agents send to each other.
-  Multi-agent benchmark tasks require the named agents to exist AND the required ones to receive messages from
-  another agent, so a single agent faking the outputs fails (`TOPOLOGY`). For any multi-agent build, the release
-  gate fails if a peer agent is never used.
-- **Agentverse hosting API:** one version per client (`AGENTVERSE_HOSTING_API=auto|v1|v2`). `auto` switches the
-  whole client to v2 if v1 is gone. Each address remembers its version, so upload/start/stop/delete/logs never mix.
-- **Budget:** each model call is checked against the cap BEFORE it is made. `evolve --estimate` prints the cost of a
-  round; `--dev-limit N` and `--max-usd X` keep rounds affordable.
-- **Authorization:** only the requesting address can approve, pay, publish, inspect or learn from its job.
-  `evolve`/`rollback` from chat are admin-only (`FOUNDRY_ADMINS`; say `whoami` to get your address). Learning runs
-  are rate-limited.
-- **Single-use final set:** it can only be opened by `eval-final`, once. A second run needs `--reopen "<reason>"`,
-  which is logged and shown in the report. This is an application-level control plus a content hash in a
-  hash-chained ledger, not cryptographic sealing; in Docker mode generated code also can't read the files.
-- **What the tests prove:** (the number of passing tests is NOT the number of real builds) `tests/test_offline.py`, `test_learn.py`, `test_scout.py`, `test_security.py` use a
-  scripted model to prove the control logic for $0. `tests/test_real_engine.py` uses the REAL uAgents runtime and
-  sandbox: correct vs defective agent, API keys not visible to generated code, sealed tests unreadable in Docker.
-  The real proof of self-improvement is a live `evolve` run with your keys: its numbers come only from the ledger.
+## Integrity and safety
+- **Release gate (fail-closed):** `verified` requires, on the FINAL artifact: every independent test passed, static
+  gate clean, every card valid, no load errors, and for multi-agent systems **observed collaboration**: each
+  required peer *processed* (handler ran, no exception) a message from another generated agent during a *passing*
+  test. Send-side and receive-side taps record sender, recipient, type, correlation id and time. If either tap is
+  missing, collaboration is **UNVERIFIED** and the build is not verified. One agent pretending to be three fails.
+  Agent names in the Architect's plan become requirements; the plan itself is never evidence.
+- **Publication states:** `FAILED` (torn down) · `DEPLOYED` (running, profile written, live ACP call acknowledged
+  **and** behaviourally correct, not yet in the search index) · `DISCOVERABLE` (also returned by Agentverse search).
+  Only `DISCOVERABLE` is called published. Teardown is confirmed by a 404, otherwise reported as unconfirmed.
+  Progress is written after every created agent, so `recover` can clean up after a crash; a retry never deploys a
+  duplicate. Code containing any factory credential is refused before upload.
+- **Budgets:** every model call reserves its worst case (input estimate + the **full** output-token ceiling at the
+  configured price) atomically across job → evolution run → project, plus per-provider ceilings, before sending.
+  Actual cost replaces the reservation afterwards. Unknown pricing is refused. Cancellation stops later stages.
+  Estimated, calculated and provider-reported costs are kept separate (`evidence/usage.db`). Limit: a provider can
+  still bill more than the reservation if it ignores `max_tokens` or bills asynchronously; overruns are recorded.
+- **Authorization:** role agents accept `RoleTask` only from the Foreman's address (authenticated by the uAgents
+  envelope) and refuse role confusion and skill paths outside the skill store; replies are bound to request id and
+  expected sender. Users can act only on their own jobs; payment commits are checked against the job owner, verified
+  with Stripe before work starts, and idempotent across retries and restarts. `evolve`/`rollback` are admin-only.
+- **Sandbox:** `FOUNDRY_SANDBOX` must be set explicitly; there is no silent fallback. Sealed promotion/final sets
+  require Docker (an override is possible only with a logged reason). The job file holds only agent code and the
+  messages to send, never expectations. No credentials enter the sandbox or deployed code.
+- **Benchmark integrity:** `bench/MANIFEST.json` freezes a SHA-256 and a content fingerprint per spec; `lint`
+  detects changed files, duplicate and near-duplicate tasks across splits, and warns when the promotion set has been
+  reused enough to risk overfitting. The final set is single-use and every opening is in the ledger. These are audit
+  controls, not cryptographic secrecy: the files are plain JSON on disk.
+- **Proof Passport:** every user build gets `runs/<job>/passport.json` (spec hash, code SHA-256, skill digest,
+  models, harness digest, environment, examiner identity, tests, observed collaboration, security, cards, external
+  action receipts, publication and discoverability, three kinds of spend, limitations, untested assumptions,
+  evidence file hashes, related experiments, ledger anchor). Statuses are PASS · FAIL · UNVERIFIED · NOT TESTED and
+  claims are OBSERVED or INFERRED; an INFERRED claim can never be PASS. `passport-verify` re-derives every digest.
+- **Ledger:** hash-chained JSONL. Edits to earlier records are detectable; it is **not** signed, so someone who can
+  rewrite the whole file can rebuild the chain.
 
 ## Costs (measured, not guessed)
-Model tokens are metered per role and per provider. Agentverse hosting and local sandbox compute are NOT metered
-(shown as such on the quote). The quote shows the estimate, the hard cap, and afterwards actual vs quoted.
-An evolution round is about 14 dev + 8 promotion builds (plus 8 baseline the first time). Watch
-`python -m foundry history` for $/build.
+Model tokens are metered per call, role and provider. Agentverse hosting and local sandbox compute are NOT metered
+(said so on the quote and in the passport). The capability card shows the estimate, the hard cap, what happens when
+the cap is reached, and the ongoing per-call cost; afterwards actual vs quoted with the three cost kinds.
 
 ## Honest limits
 - FOUNDRY verifies behaviour on the executed tests. Behaviour outside them is labelled *inferred*.
-- Promotion is evidence on 8 sealed tasks, not proof of general improvement. That's why there is an untouched final
-  set and a baseline comparison.
-- "Claim" = deploy the exact verified build into **your** Agentverse account
-  (`CLAIM_AGENTVERSE_API_KEY=... python -m foundry claim job_xxxxxx`). It is not a transfer of FOUNDRY's copy.
+- Promotion is evidence on 10 sealed tasks, not proof of general improvement; the final comparison is labelled a
+  small sample below 30 builds per arm.
+- "Claim" = deploy the exact verified build into **your** Agentverse account (`CLAIM_AGENTVERSE_API_KEY=...
+  python -m foundry claim job_xxxxxx`). It is not a transfer of FOUNDRY's copy; no ownership-transfer API is used.
+- Not implemented: GitHub showcase (spec in `docs/SHOWCASE.md`), fault-injection recovery metric, Sentry, neural
+  weight adaptation (P2).
 
 ## Layout
 `foundry/` engine · `foundry/roles/` role logic · `foundry/agents/` uAgents (Foreman, network, payments) ·
-`foundry/harness/` sandboxed ACP runner · `bench/` 14 dev + sealed 8 promotion + 8 final specs
-(`tools/make_bench.py`) · `skills/versions/` every skill version · `evidence/` ledger, gates, report.
+`foundry/harness/` sandboxed ACP runner · `foundry/passport.py` Proof Passport · `foundry/usage.py` usage ledger ·
+`foundry/jobs.py` lifecycle + recovery · `foundry/trace.py` traces · `foundry/compare.py` controlled comparison ·
+`bench/` 16 dev + sealed 10 promotion + 9 final specs and `MANIFEST.json` · `skills/versions/` every skill version ·
+`evidence/` ledger, usage.db, gates, report · `docs/` engineering report, experiment runbook, showcase spec ·
+`THIRD_PARTY_NOTICES.md` Dapta attribution (MIT).

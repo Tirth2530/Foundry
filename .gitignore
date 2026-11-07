@@ -6,3 +6,5 @@ runs/
 skills/candidates/
 *_data.json
 .pytest_cache/
+evidence/usage.db*
+evidence/sealed/

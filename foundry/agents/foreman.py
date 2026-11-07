@@ -335,7 +335,7 @@ class Foreman:
 
     def _scout_worker(self, sender, request, budget, v):
         try:
-            res = pipeline.rpc("scout", "find", scout.find, skills=v, meter=llm.CostMeter(cap_usd=0.30), events=[],
+            res = pipeline.rpc("scout", "find", scout.find, skills=v, meter=llm.new_meter(0.30, name="scout"), events=[],
                                request=request)
         except Exception as e:  # noqa: BLE001 - discovery is optional; building is always available
             res = {"found": False, "error": f"{type(e).__name__}: {e}"}

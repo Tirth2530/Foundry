@@ -186,3 +186,11 @@ def test_inconclusive_evaluation_is_not_promoted():
             "infrastructure_failures": 2}
     ok, why = judge.decide(cur, cand)
     assert not ok and "inconclusive" in why
+
+
+def test_every_budget_in_the_codebase_ends_at_the_project_ceiling():
+    """A meter built directly with CostMeter(...) would bypass FOUNDRY_PROJECT_CAP_USD; only llm.py may do it."""
+    import pathlib
+    root = pathlib.Path(config.ROOT / "foundry")
+    offenders = [str(p) for p in root.rglob("*.py") if p.name != "llm.py" and "CostMeter(" in p.read_text()]
+    assert offenders == []
