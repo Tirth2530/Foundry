@@ -86,7 +86,25 @@ def estimate_round(dev_limit: int | None, repeats: int, usd_per_build: float | N
             "note": "includes a one-time promotion baseline" if first else "promotion baseline cached"}
 
 
+def preflight(say=print) -> None:
+    """Fail in seconds, before spending anything, if the environment can't produce valid evidence."""
+    from .harness import run as harness
+    problems = []
+    try:
+        say(f"preflight: sandbox mode = {harness.sandbox_mode()}")
+    except harness.InfrastructureError as e:
+        problems.append(str(e))
+    for role, prov in (("builder", "gpt"), ("examiner", "meta")):
+        if not llm.available(sk.load().route(role)):
+            say(f"preflight: note - {role} model '{sk.load().route(role)}' has no key; a fallback will be used")
+    if not any(llm.available(p) for p in config.PROVIDERS):
+        problems.append("no model API keys configured")
+    if problems:
+        raise SystemExit("PREFLIGHT FAILED (nothing was spent):\n  - " + "\n  - ".join(problems))
+
+
 def run(rounds: int, repeats: int = 1, say=print, dev_limit: int | None = None, max_usd: float | None = None) -> None:
+    preflight(say)
     history = ledger.read("patch_decision")
     meter = llm.CostMeter()
     t_start = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -104,13 +122,25 @@ def run(rounds: int, repeats: int = 1, say=print, dev_limit: int | None = None, 
         say(f"dev: {solved}/{len(dev)} tasks solved, ${sum(b['cost']['total_usd'] for b in dev):.3f}")
         ledger.append("dev_round", version=cur.version, solved=solved, tasks=len(dev),
                       usd=round(sum(b["cost"]["total_usd"] for b in dev), 4))
+        infra = [b for b in dev if b.get("error_kind") == "infrastructure"]
+        if infra:
+            say(f"ABORTING ROUND: {len(infra)}/{len(dev)} builds hit an environment problem, not a skill problem. "
+                f"Nothing will be learned from it.\n  first error: {infra[0].get('error', '')[:300]}")
+            ledger.append("round_aborted", reason="infrastructure", error=infra[0].get("error", "")[:300])
+            break
         cluster = miner.mine(dev, cur, meter)
         if not cluster:
             say("no failures on dev: nothing to learn this round")
             break
         say(f"miner: top cluster {cluster['code']} x{cluster['count']} over {cluster['spec_count']} tasks")
         say(f"  root cause: {cluster.get('root_cause', '')[:240]}")
-        gate(cur, cluster, history, meter, repeats, say, origin=f"dev round on {cur.version}")
+        from .harness.run import InfrastructureError
+        try:
+            gate(cur, cluster, history, meter, repeats, say, origin=f"dev round on {cur.version}")
+        except InfrastructureError as e:
+            say(f"ABORTING ROUND during promotion: {e}. The candidate is discarded; nothing was promoted.")
+            ledger.append("round_aborted", reason="infrastructure", error=str(e)[:300])
+            break
     say(f"\nbuild spend this run: ${spent_since(t_start)} · meta-cost (miner+evolver): ${meter.total_usd:.3f}")
 
 
@@ -137,6 +167,7 @@ def learn_from_job(job_id: str, repeats: int = 1, say=print) -> dict | None:
     """Live self-improvement from ONE build: the defects caught while building job_id become one
     patch to FOUNDRY itself, which must beat the sealed promotion set (tasks it has never seen
     while learning) with zero regressions, or it is rolled back."""
+    preflight(say)
     fails = job_failures(job_id)
     if not fails:
         say(f"{job_id}: the verifier caught no defects during this build, so there is nothing to learn from it")

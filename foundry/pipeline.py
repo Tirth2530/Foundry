@@ -17,6 +17,14 @@ from .harness import run as harness
 from .roles import adversary, architect, builder, card_validator, examiner, integrator
 
 
+INFRA_MARKERS = ("SANDBOX UNAVAILABLE", "InfrastructureError", "HTTP 401", "HTTP 403", "invalid_api_key",
+                 "insufficient_quota", "No model API keys", "Docker", "Connection refused", "all providers failed")
+
+
+def is_infrastructure(err: str) -> bool:
+    return any(m in (err or "") for m in INFRA_MARKERS)
+
+
 def new_job_id() -> str:
     return "job_" + uuid.uuid4().hex[:6]
 
@@ -194,6 +202,7 @@ def build(request: str, skills, *, budget_usd: float | None = None, job_id: str 
     except Exception as e:  # noqa: BLE001 - recorded as evidence, surfaced by Recovery
         result["status"] = "error"
         result["error"] = f"{type(e).__name__}: {e}"
+        result["error_kind"] = "infrastructure" if is_infrastructure(result["error"]) else "build"
     result["cost"] = meter.summary()
     result["seconds"] = round(time.time() - t0, 1)
     result["evidence"] = observed_vs_inferred(result)

@@ -30,6 +30,11 @@ def evaluate(skillset, split: str = "promotion", *, purpose: str, repeats: int =
 
     with ThreadPoolExecutor(max_workers=config.PARALLEL_BUILDS) as ex:
         builds = list(ex.map(one, jobs))
+    infra = [b for b in builds if b.get("error_kind") == "infrastructure"]
+    if infra:
+        from ..harness.run import InfrastructureError
+        raise InfrastructureError(f"{len(infra)} {split} builds hit an environment problem; evaluation is invalid: "
+                                  f"{infra[0].get('error', '')[:200]}")
     per_spec: dict = {}
     for b in builds:
         h = b.get("hidden") or {"solved": False, "passed": 0, "cases": 0}

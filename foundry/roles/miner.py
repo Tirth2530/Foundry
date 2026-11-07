@@ -19,7 +19,7 @@ def mine(builds: list[dict], skills, meter, exclude_codes: set | None = None, ev
     for b in builds:
         for f in (b.get("hidden") or {}).get("failures", []):
             fails.append({**f, "spec": b.get("spec_id"), "job": b.get("job_id")})
-        if b.get("status") == "error":
+        if b.get("status") == "error" and b.get("error_kind") != "infrastructure":
             fails.append({"code": "BUILD_ERROR", "detail": b.get("error", ""), "spec": b.get("spec_id"),
                           "job": b.get("job_id"), "case": "-", "send": ""})
     counts = Counter(f["code"] for f in fails if f["code"] not in exclude_codes)

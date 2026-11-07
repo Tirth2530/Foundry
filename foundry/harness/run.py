@@ -62,15 +62,36 @@ RUNNER = Path(__file__).resolve().parent / "runner.py"
 IMAGE = config.env("FOUNDRY_SANDBOX_IMAGE", "foundry-sandbox:1")
 
 
+class InfrastructureError(RuntimeError):
+    """The environment is broken (Docker down, image missing). Never a lesson for evolution."""
+
+
+def docker_status() -> str:
+    if not shutil.which("docker"):
+        return "no-docker"
+    try:
+        if subprocess.run(["docker", "info"], capture_output=True, timeout=20).returncode != 0:
+            return "daemon-down"
+        if subprocess.run(["docker", "image", "inspect", IMAGE], capture_output=True, timeout=20).returncode != 0:
+            return "no-image"
+    except subprocess.TimeoutExpired:
+        return "daemon-down"
+    return "ok"
+
+
 def sandbox_mode() -> str:
     want = config.env("FOUNDRY_SANDBOX", "auto")
     if want == "process":
         return "process"
-    has_image = shutil.which("docker") and subprocess.run(
-        ["docker", "image", "inspect", IMAGE], capture_output=True).returncode == 0
-    if want == "docker" and not has_image:
-        raise RuntimeError(f"FOUNDRY_SANDBOX=docker but image {IMAGE} is missing: run `python -m foundry sandbox-build`")
-    return "docker" if has_image else "process"
+    st = docker_status()
+    if st == "ok":
+        return "docker"
+    if want == "docker":
+        msg = {"no-docker": "Docker is not installed",
+               "daemon-down": "Docker Desktop is not running: open it (`open -a Docker`) and wait for 'Engine running'",
+               "no-image": f"sandbox image {IMAGE} is missing: run `python -m foundry sandbox-build`"}[st]
+        raise InfrastructureError(f"SANDBOX UNAVAILABLE: {msg}")
+    return "process"
 
 
 def _command(mode: str, job_path: str, work: str, hard: float) -> list[str]:

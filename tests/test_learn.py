@@ -43,3 +43,25 @@ def test_ablation_arm_when_evolution_changed_models_or_budget(sandbox):
     out = evolve.evaluate_final(repeats=1, say=lambda *_: None)
     ablation = [v for v in out if v.endswith("lessons-only")]
     assert ablation and out[ablation[0]]["repair_budget"] == 2 and out[ablation[0]]["lessons"] == 2
+
+
+def test_environment_failures_are_never_learned_from(sandbox, monkeypatch):
+    import pytest
+    from foundry.harness import run as harness
+    monkeypatch.setattr(harness, "sandbox_mode", lambda: (_ for _ in ()).throw(
+        harness.InfrastructureError("SANDBOX UNAVAILABLE: Docker Desktop is not running")))
+    with pytest.raises(SystemExit) as e:
+        evolve.run(1, say=lambda *_: None)
+    assert "PREFLIGHT FAILED" in str(e.value) and not ledger.read("build")  # nothing spent
+
+
+def test_infra_errors_mid_round_abort_without_a_patch(sandbox, monkeypatch):
+    from foundry.harness import run as harness
+
+    def boom(*a, **k):
+        raise harness.InfrastructureError("SANDBOX UNAVAILABLE: Docker Desktop is not running")
+    monkeypatch.setattr(evolve, "preflight", lambda say=print: None)
+    monkeypatch.setattr(harness, "run", boom)
+    evolve.run(1, say=lambda *_: None)
+    assert ledger.read("round_aborted") and not ledger.read("patch_proposed")
+    assert sk.current_version() == "v0000"
