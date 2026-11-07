@@ -1,4 +1,5 @@
-"""FOUNDRY's agent network: 14 role agents + the Foreman, running in one uAgents Bureau.
+"""FOUNDRY's agent network: 15 role agents + the Foreman. Locally in a Bureau, or (FOUNDRY_NETWORK_MODE=agentverse)
+as separate Agentverse mailbox agents so every task and result travels through Agentverse.
 
 Each role is its own uAgent with its own address. The Foreman's jobs talk to them only
 through RoleTask/RoleResult messages (see pipeline.TRANSPORT). Trust boundaries:
@@ -117,11 +118,81 @@ SENSITIVE = {"publisher": "deploys to Agentverse", "evolver": "changes FOUNDRY's
              "ledger": "writes evidence", "miner": "spends model budget", "builder": "spends model budget"}
 
 
-def make_role_agent(role: str, allowed: set | None = None) -> Agent:
+ROLE_PORT_BASE = int(config.env("FOUNDRY_ROLE_PORT_BASE", "8101"))
+
+ABOUT = {
+    "scout": "searches Agentverse and FOUNDRY's verified catalog for an agent that already does the job, then "
+             "re-tests the best matches LIVE before anything is reused",
+    "architect": "designs the agent or multi-agent system: which agents, who talks to whom, the entry agent",
+    "examiner": "writes the hidden acceptance tests from the request alone; it never sees the code and runs on a "
+                "different model family from the builder",
+    "adversary": "writes edge-case and hostile inputs the examiner might miss",
+    "builder": "writes and repairs the uAgents code (GPT-5); it never sees the hidden tests",
+    "integrator": "static safety gate: hosted-agent contract, no files/env/subprocess/eval, no module-level state",
+    "runner": "the only agent that executes generated code: an isolated sandbox over the real Agent Chat Protocol",
+    "card_validator": "checks every ASI:One interactive card the generated agents send against the card schema",
+    "quartermaster": "prices builds from measured history, sets the spend cap, reconciles actual cost",
+    "publisher": "deploys verified systems to Agentverse, live-tests them there and tears down on any failure",
+    "ledger": "appends every decision to FOUNDRY's hash-chained evidence ledger",
+    "recovery": "decides bounded retries when a role fails; budget failures are never retried",
+    "miner": "clusters the defects caught across builds into one root cause worth learning from",
+    "judge": "sealed promotion judge: accepts a skill change only with more held-out tasks solved and zero "
+             "regressions",
+    "evolver": "proposes the skill change (a lesson or setting) that targets the mined root cause",
+}
+
+
+def _identity_address(seed: str) -> str:
+    """The address an Agent with this seed will have, WITHOUT creating an Agent (creating one registers it with
+    this process's dispatcher, which would deliver messages locally instead of through Agentverse)."""
+    try:
+        from uagents.crypto import Identity
+    except ImportError:  # newer layouts
+        from uagents_core.identity import Identity
+    return Identity.from_seed(seed, 0).address
+
+
+def role_seed(role: str) -> str:
+    return f"{config.FOREMAN_SEED}-role-{role}"
+
+
+def role_addresses() -> dict:
+    return {r: _identity_address(role_seed(r)) for r in REGISTRY}
+
+
+def foreman_address() -> str:
+    return _identity_address(config.FOREMAN_SEED)
+
+
+def role_readme(role: str, foreman: str) -> str:
+    return (f"# FOUNDRY · {role}\n\n{ABOUT.get(role, '')}.\n\n"
+            "Part of **FOUNDRY**, a self-improving factory for Fetch.ai agents that proves its work: independent "
+            "tests, a sandboxed run over the real Agent Chat Protocol, a release gate, a Proof Passport, and "
+            "publication to Agentverse.\n\n"
+            f"This agent accepts `RoleTask` messages **only from the FOUNDRY Foreman** (`{foreman}`); the sender "
+            "is authenticated by the uAgents envelope signature. Anyone else is refused and logged.\n\n"
+            "Talk to FOUNDRY through the Foreman in ASI:One.\n")
+
+
+def make_role_agent(role: str, allowed: set | None = None, *, port: int | None = None, mailbox: bool = False,
+                    readme_path: str | None = None) -> Agent:
     """A role agent only accepts RoleTask messages from `allowed` addresses (the Foreman). The sender address of
     a uAgents message is authenticated by the envelope signature, so an allowlist of addresses is an identity
-    check, not a name check. Anything else is refused, logged, and never executed."""
-    a = Agent(name=f"foundry-{role}", seed=f"{config.FOREMAN_SEED}-role-{role}")
+    check, not a name check. Anything else is refused, logged, and never executed.
+    mailbox=True makes it a real Agentverse agent (own profile, messages routed through Agentverse)."""
+    kw = dict(name=f"foundry-{role}", seed=role_seed(role))
+    if port:
+        kw["port"] = port
+    if mailbox:
+        kw.update(mailbox=True, publish_agent_details=True)
+        if readme_path:
+            kw["readme_path"] = readme_path
+    try:
+        a = Agent(**kw)
+    except TypeError:  # older uAgents without readme_path / publish_agent_details
+        kw.pop("readme_path", None)
+        kw.pop("publish_agent_details", None)
+        a = Agent(**kw)
     allowed = set(allowed or ())
 
     @a.on_message(RoleTask, replies=RoleResult)
@@ -135,8 +206,15 @@ def make_role_agent(role: str, allowed: set | None = None) -> Agent:
             return
         task = json.loads(msg.payload)
         task["role"] = role
+        t0 = time.time()
+        log = getattr(getattr(ctx, "logger", None), "info", None) or (lambda *_: None)
+        log(f"[{role}] task {msg.rid[:8]} from Foreman: {task.get('op')}")
         res = await asyncio.to_thread(execute, task)
         ok = res.pop("ok")
+        spent = sum(float(c.get("usd") or 0) for c in res.get("calls") or [] if isinstance(c, dict))
+        log(f"[{role}] task {msg.rid[:8]} {'done' if ok else 'FAILED'} in {time.time() - t0:.1f}s"
+                        + (f", model spend ${spent:.4f}" if spent else "")
+                        + ("" if ok else f": {str(res.get('error'))[:200]}"))
         await ctx.send(sender, RoleResult(rid=msg.rid, role=role, ok=ok, payload=json.dumps(res, default=str)))
 
     return a
@@ -207,6 +285,7 @@ def build_roles(foreman_address: str) -> dict:
 
 
 def install(foreman: Agent, roles: dict) -> Transport:
-    t = Transport(foreman, {r: a.address for r, a in roles.items()})
+    """roles: {role: Agent} (local) or {role: address} (remote Agentverse mailbox agents)."""
+    t = Transport(foreman, {r: (a if isinstance(a, str) else a.address) for r, a in roles.items()})
     pipeline.TRANSPORT = t
     return t

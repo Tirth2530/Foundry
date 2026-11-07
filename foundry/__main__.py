@@ -147,6 +147,15 @@ def cmd_serve(a):
         agent.run()
         return
     from .agents import network
+    if config.NETWORK_MODE == "agentverse":
+        # Role agents run as separate Agentverse mailbox agents (`python -m foundry serve-roles`); the Foreman
+        # only knows their ADDRESSES, so every task and result is routed through Agentverse.
+        addrs = network.role_addresses()
+        network.install(agent, addrs)
+        fm.Foreman(agent)
+        print(f"FOUNDRY Foreman {agent.address} -> {len(addrs)} role agents on Agentverse")
+        agent.run()
+        return
     roles = network.build_roles(agent.address)  # role agents accept tasks from the Foreman only
     network.install(agent, roles)
     fm.Foreman(agent)
@@ -167,6 +176,58 @@ def cmd_serve(a):
         roles_bureau.add(r)
     loop = asyncio.get_event_loop()
     loop.run_until_complete(asyncio.gather(agent.run_async(), roles_bureau.run_async()))
+
+
+def cmd_serve_roles(_):
+    """Every FOUNDRY role as a real Agentverse mailbox agent: own port, own profile + README, connected to
+    Agentverse automatically with AGENTVERSE_API_KEY. They accept RoleTask only from the Foreman's address."""
+    import asyncio
+    import threading
+    import time as _t
+    import requests
+    from . import config
+    from .agents import network
+    if not config.AGENTVERSE_API_KEY:
+        raise SystemExit("AGENTVERSE_API_KEY is required to connect the role agents to Agentverse")
+    foreman = network.foreman_address()
+    rd = config.RUNS / "_role_readmes"
+    rd.mkdir(parents=True, exist_ok=True)
+    agents, ports = {}, {}
+    for i, role in enumerate(network.REGISTRY):
+        port = network.ROLE_PORT_BASE + i
+        f = rd / f"{role}.md"
+        f.write_text(network.role_readme(role, foreman))
+        agents[role] = network.make_role_agent(role, {foreman}, port=port, mailbox=True, readme_path=str(f))
+        ports[role] = port
+    expected = network.role_addresses()
+    bad = [r for r, a in agents.items() if a.address != expected[r]]
+    if bad:
+        raise SystemExit(f"address derivation mismatch for {bad}: the Foreman would not find them")
+    print(f"FOUNDRY role agents (accept tasks only from Foreman {foreman}):")
+    for r, a in agents.items():
+        print(f"  {r:15s} {a.address}  port {ports[r]}")
+
+    def connect():
+        _t.sleep(8)
+        ok = 0
+        for r, port in ports.items():
+            for attempt in range(5):
+                try:
+                    resp = requests.post(f"http://127.0.0.1:{port}/connect", timeout=30,
+                                         json={"user_token": config.AGENTVERSE_API_KEY, "agent_type": "mailbox"})
+                    good = resp.status_code < 300 and "false" not in resp.text.lower()
+                    print(f"  [{'ok' if good else '!!'}] {r} mailbox connect: {resp.text[:120]}")
+                    ok += bool(good)
+                    break
+                except Exception as e:  # noqa: BLE001
+                    if attempt == 4:
+                        print(f"  [!!] {r} mailbox connect failed: {e}")
+                    _t.sleep(3)
+        print(f"\n{ok}/{len(ports)} role agents connected to Agentverse. Start the Foreman in another terminal with "
+              "FOUNDRY_NETWORK_MODE=agentverse")
+    threading.Thread(target=connect, daemon=True).start()
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(asyncio.gather(*(a.run_async() for a in agents.values())))
 
 
 def cmd_evolve(a):
@@ -340,6 +401,7 @@ def main():
     sub.add_parser("doctor")
     sub.add_parser("gate1")
     sub.add_parser("selftest")
+    sub.add_parser("serve-roles")
     b = sub.add_parser("build")
     b.add_argument("request")
     b.add_argument("--budget", type=float, default=None)
@@ -382,7 +444,7 @@ def main():
     sc = sub.add_parser("scout")
     sc.add_argument("text")
     a = ap.parse_args()
-    {"doctor": cmd_doctor, "gate1": cmd_gate1, "selftest": cmd_selftest, "build": cmd_build, "serve": cmd_serve,
+    {"doctor": cmd_doctor, "gate1": cmd_gate1, "selftest": cmd_selftest, "serve-roles": cmd_serve_roles, "build": cmd_build, "serve": cmd_serve,
      "evolve": cmd_evolve, "eval-final": cmd_eval_final, "history": cmd_history, "rollback": cmd_rollback,
      "claim": cmd_claim, "learn": cmd_learn, "sandbox-build": cmd_sandbox_build, "report": cmd_report, "recheck": cmd_recheck,
      "passport": cmd_passport, "recover": cmd_recover, "trace": cmd_trace, "passport-verify": cmd_passport_verify, "lint": cmd_lint, "bench-freeze": cmd_bench_freeze, "search": cmd_search,
