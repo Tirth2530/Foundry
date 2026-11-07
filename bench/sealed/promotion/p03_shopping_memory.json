@@ -1,0 +1,96 @@
+{
+ "id": "p03_shopping_memory",
+ "title": "Shopping list with memory",
+ "request": "Shopping list with per-user memory. 'add <qty> <item>' adds the quantity (quantities of the same item add up) and replies 'OK: <item> x<total>'. 'remove <item>' deletes it and replies 'Removed <item>' (or 'Not on list: <item>'). 'show' replies 'Shopping list: ' followed by '<item> x<qty>' entries sorted alphabetically and separated by ', ', or 'Shopping list is empty'.",
+ "tests": [
+  {
+   "name": "flow",
+   "turns": [
+    {
+     "send": "add 2 apples",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "OK: apples x2"
+      }
+     ]
+    },
+    {
+     "send": "add 3 apples",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "OK: apples x5"
+      }
+     ]
+    },
+    {
+     "send": "add 1 bread",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "OK: bread x1"
+      }
+     ]
+    },
+    {
+     "send": "show",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Shopping list: apples x5, bread x1"
+      }
+     ]
+    },
+    {
+     "send": "remove bread",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Removed bread"
+      }
+     ]
+    },
+    {
+     "send": "show",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "apples x5"
+      },
+      {
+       "type": "text_not_contains",
+       "value": "bread"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "empty",
+   "turns": [
+    {
+     "send": "remove milk",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Not on list: milk"
+      }
+     ]
+    },
+    {
+     "send": "show",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Shopping list is empty"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

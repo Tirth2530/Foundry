@@ -1,0 +1,73 @@
+{
+ "id": "f06_port_form",
+ "title": "Port lookup with form card",
+ "request": "Well-known port lookup. Known services: ssh 22, smtp 25, dns 53, http 80, https 443, postgres 5432, redis 6379, mongodb 27017. If the message names a known service (as a whole word), reply '<service> uses port <port>'. If no known service is mentioned, reply 'Which service?' with a form card containing a select field named 'service' whose options are the eight services, and a submit button whose selection is {\"action\":\"lookup\"}. When the submitted form arrives as JSON (e.g. {\"action\":\"lookup\",\"service\":\"redis\"}) answer the same way.",
+ "tests": [
+  {
+   "name": "postgres",
+   "turns": [
+    {
+     "send": "what port does postgres use",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "postgres uses port 5432"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "https_word",
+   "turns": [
+    {
+     "send": "https",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "https uses port 443"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "form",
+   "turns": [
+    {
+     "send": "which port?",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Which service"
+      },
+      {
+       "type": "card",
+       "fields": [
+        "service"
+       ],
+       "kind": "form"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "submit",
+   "turns": [
+    {
+     "send": "{\"action\": \"lookup\", \"service\": \"redis\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "redis uses port 6379"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

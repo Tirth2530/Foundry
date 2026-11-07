@@ -1,0 +1,77 @@
+{
+ "id": "p02_temperature_form",
+ "title": "Temperature converter with form card",
+ "request": "Temperature converter between Celsius and Fahrenheit. '<number> C' replies '<number> C = <F> F' and '<number> F' replies '<number> F = <C> C', results rounded to 1 decimal. If no unit is given, reply 'Which scale?' with a form card that has a number field named 'value', a select field named 'scale' with options C and F, and a submit button whose selection is {\"action\":\"convert\"}. When the submitted form arrives as JSON (e.g. {\"action\":\"convert\",\"value\":\"100\",\"scale\":\"C\"}) convert it the same way.",
+ "tests": [
+  {
+   "name": "c_to_f",
+   "turns": [
+    {
+     "send": "100 C",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_number",
+       "value": 212,
+       "tol": 0.05
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "f_to_c",
+   "turns": [
+    {
+     "send": "98.6 F",
+     "checks": [
+      {
+       "type": "text_number",
+       "value": 37,
+       "tol": 0.05
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "form",
+   "turns": [
+    {
+     "send": "convert 40",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Which scale"
+      },
+      {
+       "type": "card",
+       "fields": [
+        "value",
+        "scale"
+       ],
+       "kind": "form"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "submit",
+   "turns": [
+    {
+     "send": "{\"action\": \"convert\", \"value\": \"-40\", \"scale\": \"F\"}",
+     "checks": [
+      {
+       "type": "text_number",
+       "value": -40,
+       "tol": 0.05
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,232 @@
+"""FOUNDRY command line.  python -m foundry <command>
+
+  doctor                     check keys, packages and every model provider with a 1-token call
+  gate1                      Gate 1: create + deploy + independently invoke a new hosted agent
+  selftest                   Gate 2 (no LLM needed): harness catches a real defect in a known agent
+  build "<request>"          one verified build with the current skills  [--publish]
+  serve [--direct]           run the agent network (Foreman on ASI:One + 14 role agents)
+  evolve --rounds N          Gate 3: self-improvement rounds (dev -> patch -> sealed promotion gate)
+  eval-final [--repeats 2]   baseline v0000 vs current on the untouched final set (run once, at the end)
+  history                    every patch FOUNDRY proposed, and what the gate decided
+  rollback vNNNN             point CURRENT back to an earlier skill version
+  claim job_xxxxxx           deploy a verified build into YOUR Agentverse account (CLAIM_AGENTVERSE_API_KEY)
+  report                     write evidence/report.md (numbers for the pitch)
+  lint                       validate benchmark specs and the ledger hash chain
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+
+
+def cmd_doctor(_):
+    from . import config, llm
+    ok = True
+    for mod in ("uagents", "uagents_core", "requests"):
+        try:
+            __import__(mod)
+            print(f"[ok] package {mod}")
+        except ImportError:
+            ok = False
+            print(f"[!!] package {mod} missing: pip install -r requirements.txt")
+    for p, c in config.PROVIDERS.items():
+        if not c["api_key"]:
+            print(f"[--] {p}: no key (will fall back to another provider)")
+            continue
+        try:
+            r = llm.chat([{"role": "user", "content": "Reply with the single word OK."}], provider=p, role="doctor",
+                         max_tokens=20)
+            print(f"[ok] {p} ({c['model']}): {r['text'].strip()[:20]!r} {r['tokens_in']}+{r['tokens_out']} tokens")
+        except Exception as e:  # noqa: BLE001
+            ok = False
+            print(f"[!!] {p} ({c['model']}): {e}")
+    if config.AGENTVERSE_API_KEY:
+        import requests
+        r = requests.get(f"{config.AGENTVERSE_URL}/v1/hosting/agents",
+                         headers={"Authorization": f"Bearer {config.AGENTVERSE_API_KEY}"}, timeout=20)
+        print(f"[{'ok' if r.status_code < 300 else '!!'}] Agentverse API key (HTTP {r.status_code})")
+    else:
+        print("[--] AGENTVERSE_API_KEY not set (needed for gate1/publish)")
+    from .agents import payments
+    print(f"[{'ok' if payments.enabled() else '--'}] Stripe test payments {'enabled' if payments.enabled() else 'off (demo mode)'}")
+    sys.exit(0 if ok else 1)
+
+
+def cmd_gate1(_):
+    import runpy
+    from . import config
+    runpy.run_path(str(config.ROOT / "tools" / "gate1_spike.py"), run_name="__main__")
+
+
+def cmd_selftest(_):
+    from . import config
+    from .harness import run as harness
+    from .roles import card_validator
+    ref = config.ROOT / "tools" / "reference"
+    spec = json.loads((ref / "spec.json").read_text())
+    good = (ref / "good_agent.py").read_text()
+    bad = (ref / "bad_agent.py").read_text()
+    print("running the CORRECT reference agent against its hidden tests...")
+    g = harness.run([{"name": "main", "code": good}], "main", spec["tests"])
+    gs = harness.summarize(g["results"])
+    print(f"  {gs['passed']}/{gs['cases']} passed; card audit issues: {len(card_validator.audit(g['raw']))}")
+    print("running a DEFECTIVE variant (wrong card key, no JSON-selection handling)...")
+    b = harness.run([{"name": "main", "code": bad}], "main", spec["tests"])
+    bs = harness.summarize(b["results"])
+    from .dsl import failures
+    fl = failures(b["results"])
+    print(f"  {bs['passed']}/{bs['cases']} passed; caught {len(fl)} failing checks:")
+    for f in fl[:5]:
+        print(f"   - {f['code']}: {f['detail'][:140]}")
+    passed = gs["passed"] == gs["cases"] and bs["passed"] < bs["cases"]
+    (config.EVIDENCE).mkdir(exist_ok=True)
+    (config.EVIDENCE / "gate2_selftest.json").write_text(json.dumps(
+        {"good": gs, "bad": bs, "caught": fl, "gate2": "PASS" if passed else "FAIL"}, indent=1))
+    print(f"\nGATE 2: {'PASS' if passed else 'FAIL'} (evidence/gate2_selftest.json)")
+    if not passed and g["stderr_tail"]:
+        print("runner stderr:\n" + g["stderr_tail"])
+
+
+def cmd_build(a):
+    from . import pipeline, skills as sk
+    s = sk.load()
+
+    def say(stage, info=None):
+        print(f"  [{stage}] {json.dumps(info) if info else ''}"[:300])
+    res = pipeline.build(a.request, s, budget_usd=a.budget, progress=say)
+    print(json.dumps({k: res.get(k) for k in ("job_id", "status", "verify", "examiner", "cost", "seconds", "error")},
+                     indent=1, default=str))
+    if a.publish and res["status"] == "verified":
+        from .roles import publisher
+        from . import config
+        exam = json.loads((config.RUNS / res["job_id"] / "examiner_tests.json").read_text())
+        print(json.dumps(publisher.publish(res, (exam.get("cases") or [None])[0]), indent=1))
+
+
+def cmd_serve(a):
+    import asyncio
+    from uagents import Bureau
+    from . import config
+    from .agents import foreman as fm
+    agent = fm.create_foreman_agent()
+    if a.direct or config.NETWORK_MODE == "direct":
+        fm.Foreman(agent)
+        print("FOUNDRY Foreman (direct mode: roles run in-process)")
+        agent.run()
+        return
+    from .agents import network
+    roles = network.build_roles()
+    network.install(agent, roles)
+    fm.Foreman(agent)
+    print(f"FOUNDRY agent network: Foreman {agent.address} + {len(roles)} role agents")
+    for name, r in roles.items():
+        print(f"  {name:15s} {r.address}")
+    if config.NETWORK_MODE == "bureau":
+        bureau = Bureau(port=config.FOREMAN_PORT)
+        bureau.add(agent)
+        for r in roles.values():
+            bureau.add(r)
+        bureau.run()
+        return
+    # default "split": the Foreman runs as a normal mailbox agent (reachable from ASI:One) and the
+    # role agents run in a Bureau on the same event loop; uAgents delivers between them locally.
+    roles_bureau = Bureau(port=config.FOREMAN_PORT + 1)
+    for r in roles.values():
+        roles_bureau.add(r)
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(asyncio.gather(agent.run_async(), roles_bureau.run_async()))
+
+
+def cmd_evolve(a):
+    from . import evolve
+    evolve.run(a.rounds, a.repeats)
+
+
+def cmd_eval_final(a):
+    from . import evolve
+    print(json.dumps(evolve.evaluate_final(a.repeats), indent=1))
+
+
+def cmd_history(_):
+    from . import ledger, skills as sk
+    print(f"current: {sk.current_version()}  versions: {sk.list_versions()}")
+    for d in ledger.read("patch_decision"):
+        p = d["patch"]
+        print(f"{d['candidate']} ({d['parent']}) {d['decision'].upper():9s} {p['kind']} {p.get('file', p.get('config_changes', ''))}"
+              f"\n    {d['current'].get('solved')}/{d['current'].get('tasks')} -> {d['candidate_eval'].get('solved')}/"
+              f"{d['candidate_eval'].get('tasks')}  ${d['candidate_eval'].get('usd_per_build')}/build :: {d['reason']}")
+
+
+def cmd_rollback(a):
+    from . import ledger, skills as sk
+    sk.rollback(a.version)
+    ledger.append("rollback", to=a.version, by="cli")
+    print(f"CURRENT -> {a.version}")
+
+
+def cmd_claim(a):
+    import os
+    from . import agentverse, config
+    from .roles import publisher
+    key = os.getenv("CLAIM_AGENTVERSE_API_KEY")
+    if not key:
+        sys.exit("Set CLAIM_AGENTVERSE_API_KEY to the Agentverse API key of the account that should own the agent.")
+    res = json.loads((config.RUNS / a.job / "result.json").read_text())
+    if res["status"] != "verified":
+        sys.exit("only verified builds can be claimed")
+    exam = json.loads((config.RUNS / a.job / "examiner_tests.json").read_text())
+    out = publisher.publish(res, (exam.get("cases") or [None])[0], client=agentverse.Client(api_key=key))
+    print(json.dumps(out, indent=1))
+
+
+def cmd_report(_):
+    from . import report
+    print(report.write())
+
+
+def cmd_lint(_):
+    from . import bench, ledger
+    rep = bench.lint_all()
+    bad = {k: v for k, v in rep.items() if v}
+    print(f"{len(rep)} specs, {len(bad)} with problems")
+    for k, v in bad.items():
+        print(f"  {k}: {v}")
+    ok, n = ledger.verify_chain()
+    print(f"ledger chain {'intact' if ok else 'BROKEN at record ' + str(n)} ({n} records)")
+    for split in bench.DIRS:
+        print(f"  {split} content hash {bench.split_hash(split)}")
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="foundry", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("doctor")
+    sub.add_parser("gate1")
+    sub.add_parser("selftest")
+    b = sub.add_parser("build")
+    b.add_argument("request")
+    b.add_argument("--budget", type=float, default=None)
+    b.add_argument("--publish", action="store_true")
+    s = sub.add_parser("serve")
+    s.add_argument("--direct", action="store_true")
+    e = sub.add_parser("evolve")
+    e.add_argument("--rounds", type=int, default=3)
+    e.add_argument("--repeats", type=int, default=1)
+    f = sub.add_parser("eval-final")
+    f.add_argument("--repeats", type=int, default=2)
+    sub.add_parser("history")
+    r = sub.add_parser("rollback")
+    r.add_argument("version")
+    c = sub.add_parser("claim")
+    c.add_argument("job")
+    sub.add_parser("report")
+    sub.add_parser("lint")
+    a = ap.parse_args()
+    {"doctor": cmd_doctor, "gate1": cmd_gate1, "selftest": cmd_selftest, "build": cmd_build, "serve": cmd_serve,
+     "evolve": cmd_evolve, "eval-final": cmd_eval_final, "history": cmd_history, "rollback": cmd_rollback,
+     "claim": cmd_claim, "report": cmd_report, "lint": cmd_lint}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    main()

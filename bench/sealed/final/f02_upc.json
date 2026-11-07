@@ -1,0 +1,56 @@
+{
+ "id": "f02_upc",
+ "title": "UPC-A checker",
+ "request": "UPC-A checker. The user sends a UPC-A code. If it is not exactly 12 digits reply 'INVALID UPC: need 12 digits'. Otherwise compute 3 x (sum of digits in positions 1,3,5,7,9,11) + (sum of digits in positions 2,4,6,8,10); the check digit is (10 - total mod 10) mod 10 and must equal digit 12. Reply 'VALID UPC' or 'INVALID UPC'.",
+ "tests": [
+  {
+   "name": "valid",
+   "turns": [
+    {
+     "send": "036000291452",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "VALID UPC"
+      },
+      {
+       "type": "text_not_contains",
+       "value": "INVALID"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "invalid",
+   "turns": [
+    {
+     "send": "036000291453",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "INVALID UPC"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "short",
+   "turns": [
+    {
+     "send": "12345",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "need 12 digits"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,114 @@
+{
+ "id": "d06_todo_memory",
+ "title": "To-do list with memory",
+ "request": "To-do list agent with memory per user. 'add <item>' adds it and replies 'Added: <item>'. 'list' replies each item on its own line as '<n>. <item>' (numbered from 1), or 'Your list is empty'. 'done <n>' removes item n and replies 'Removed: <item>'. 'clear' empties the list and replies 'Cleared'.",
+ "tests": [
+  {
+   "name": "flow",
+   "turns": [
+    {
+     "send": "add milk",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "Added: milk"
+      }
+     ]
+    },
+    {
+     "send": "add eggs",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Added: eggs"
+      }
+     ]
+    },
+    {
+     "send": "list",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "1. milk"
+      },
+      {
+       "type": "text_contains",
+       "value": "2. eggs"
+      }
+     ]
+    },
+    {
+     "send": "done 1",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Removed: milk"
+      }
+     ]
+    },
+    {
+     "send": "list",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "1. eggs"
+      },
+      {
+       "type": "text_not_contains",
+       "value": "milk"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "empty",
+   "turns": [
+    {
+     "send": "list",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Your list is empty"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "clear",
+   "turns": [
+    {
+     "send": "add bread",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Added: bread"
+      }
+     ]
+    },
+    {
+     "send": "clear",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Cleared"
+      }
+     ]
+    },
+    {
+     "send": "list",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "empty"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

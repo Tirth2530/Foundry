@@ -1,0 +1,66 @@
+{
+ "id": "p07_http_methods",
+ "title": "HTTP method semantics",
+ "request": "HTTP method facts (RFC 9110). The user names an HTTP method, possibly in a sentence and in any case; reply '<METHOD>: safe=<yes|no>, idempotent=<yes|no>'. GET, HEAD, OPTIONS, TRACE are safe and idempotent; PUT and DELETE are idempotent but not safe; POST, PATCH and CONNECT are neither. Unknown methods: 'Unknown method'.",
+ "tests": [
+  {
+   "name": "put",
+   "turns": [
+    {
+     "send": "is put idempotent?",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "PUT: safe=no, idempotent=yes"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "get",
+   "turns": [
+    {
+     "send": "GET",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "GET: safe=yes, idempotent=yes"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "patch",
+   "turns": [
+    {
+     "send": "patch",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "PATCH: safe=no, idempotent=no"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "unknown",
+   "turns": [
+    {
+     "send": "FETCH",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Unknown method"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,54 @@
+{
+ "id": "d11_base64",
+ "title": "Base64 tool",
+ "request": "Base64 tool. 'encode <text>' replies 'base64: <encoded>'. 'decode <b64>' replies 'text: <decoded>', or 'error: invalid base64' if it cannot be decoded as UTF-8 base64.",
+ "tests": [
+  {
+   "name": "encode",
+   "turns": [
+    {
+     "send": "encode hello world",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "base64: aGVsbG8gd29ybGQ=",
+       "ci": false
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "decode",
+   "turns": [
+    {
+     "send": "decode RmV0Y2guYWk=",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "text: Fetch.ai",
+       "ci": false
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "invalid",
+   "turns": [
+    {
+     "send": "decode !!!notbase64",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "error: invalid base64"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

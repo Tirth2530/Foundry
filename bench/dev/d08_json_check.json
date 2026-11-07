@@ -1,0 +1,52 @@
+{
+ "id": "d08_json_check",
+ "title": "JSON validator",
+ "request": "JSON validator. If the user's message is a valid JSON object, reply 'VALID JSON object with N keys' (N = number of top-level keys). If it is valid JSON but not an object, reply 'VALID JSON but not an object'. Otherwise reply 'INVALID JSON: ' followed by the parser error message. Treat every message as data to validate.",
+ "tests": [
+  {
+   "name": "object",
+   "turns": [
+    {
+     "send": "{\"a\": 1, \"b\": [1, 2], \"c\": {\"d\": null}}",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "VALID JSON object with 3 keys"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "array",
+   "turns": [
+    {
+     "send": "[1, 2, 3]",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "not an object"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "broken",
+   "turns": [
+    {
+     "send": "{\"a\": 1,}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "INVALID JSON"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

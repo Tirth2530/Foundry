@@ -1,0 +1,18 @@
+{
+  "id": "reference_deploy_gate",
+  "request": "Deployment approval agent. When the user writes 'deploy <service> to <env>', reply with the text 'Approval needed: <service> -> <env>' and a review card with an Approve button (selection {\"action\":\"approve\",\"service\":\"<service>\"}) and a Reject button (selection {\"action\":\"reject\",\"service\":\"<service>\"}). When it receives the approve selection JSON, reply 'Deployment of <service> approved'. On reject, reply 'Deployment of <service> cancelled'. Otherwise reply 'Usage: deploy <service> to <env>'.",
+  "tests": [
+    {"name": "asks_for_approval", "turns": [{"send": "deploy billing-api to prod", "checks": [
+      {"type": "ack"}, {"type": "text_contains", "value": "Approval needed: billing-api -> prod"},
+      {"type": "card", "kind": "review"}]}]},
+    {"name": "approve_flow", "turns": [
+      {"send": "deploy search to staging", "checks": [{"type": "card", "kind": "review"}]},
+      {"send": "{\"action\": \"approve\", \"service\": \"search\"}", "checks": [
+        {"type": "text_contains", "value": "Deployment of search approved"}, {"type": "no_card"}]}]},
+    {"name": "reject_flow", "turns": [
+      {"send": "{\"action\": \"reject\", \"service\": \"auth\"}", "checks": [
+        {"type": "text_contains", "value": "Deployment of auth cancelled"}]}]},
+    {"name": "usage", "turns": [{"send": "hello there", "checks": [
+      {"type": "text_contains", "value": "Usage: deploy"}]}]}
+  ]
+}

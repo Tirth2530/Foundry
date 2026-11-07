@@ -1,0 +1,44 @@
+{
+ "id": "d13_text_stats_end",
+ "title": "Text stats that ends the session",
+ "request": "Text statistics agent. Reply 'chars=<c> words=<w> lines=<l>' for the user's message (chars counts every character including spaces and newlines; words are whitespace-separated tokens; lines is the number of newline-separated lines). Every reply must end the chat session (include EndSessionContent).",
+ "tests": [
+  {
+   "name": "one_line",
+   "turns": [
+    {
+     "send": "hello world",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "chars=11 words=2 lines=1"
+      },
+      {
+       "type": "end_session"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "two_lines",
+   "turns": [
+    {
+     "send": "a b c\nd e",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "chars=9 words=5 lines=2"
+      },
+      {
+       "type": "end_session"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,86 @@
+{
+ "id": "f01_pr_gate_multi",
+ "title": "Three-agent pull-request gate",
+ "request": "Build THREE agents that gate pull requests. 'diff_parser' receives a unified diff and returns the changed file paths with added/removed line counts (lines starting with '+'/'-', excluding the '+++'/'---' header lines). 'policy' receives those files and flags risks: any path under 'migrations/' or ending in '.sql' (DATABASE), any path under '.github/workflows/' (CI), any file named '.env' or whose path contains 'secret' (SECRETS), or more than 300 added lines in total (LARGE). 'gatekeeper' is the entry agent: the user pastes a diff, the gatekeeper uses the other two agents and replies 'BLOCK: <comma-separated flags>' if any flag is raised, otherwise 'ALLOW: <n> files, +<added> -<removed>', and always attaches a review card titled 'Merge decision' with an Approve button (selection {\"action\":\"merge\"}) and a Reject button (selection {\"action\":\"close\"}). On the merge selection reply 'Merge recorded'; on close reply 'PR closed'.",
+ "tests": [
+  {
+   "name": "allow",
+   "turns": [
+    {
+     "send": "diff --git a/app/main.py b/app/main.py\n--- a/app/main.py\n+++ b/app/main.py\n@@ -1,2 +1,3 @@\n import os\n-x = 1\n+x = 2\n+y = 3\n",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "ALLOW: 1 files, +2 -1"
+      },
+      {
+       "type": "card",
+       "kind": "review"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "block",
+   "turns": [
+    {
+     "send": "diff --git a/migrations/0042_add_col.sql b/migrations/0042_add_col.sql\n--- /dev/null\n+++ b/migrations/0042_add_col.sql\n@@ -0,0 +1,1 @@\n+ALTER TABLE users ADD COLUMN plan TEXT;\ndiff --git a/.github/workflows/deploy.yml b/.github/workflows/deploy.yml\n--- a/.github/workflows/deploy.yml\n+++ b/.github/workflows/deploy.yml\n@@ -1,1 +1,1 @@\n-on: push\n+on: workflow_dispatch\n",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "BLOCK"
+      },
+      {
+       "type": "text_contains",
+       "value": "DATABASE"
+      },
+      {
+       "type": "text_contains",
+       "value": "CI"
+      },
+      {
+       "type": "card",
+       "kind": "review"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "secrets",
+   "turns": [
+    {
+     "send": "diff --git a/config/.env b/config/.env\n--- a/config/.env\n+++ b/config/.env\n@@ -1,1 +1,1 @@\n-API_KEY=old\n+API_KEY=new\n",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "BLOCK"
+      },
+      {
+       "type": "text_contains",
+       "value": "SECRETS"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "merge",
+   "turns": [
+    {
+     "send": "{\"action\": \"merge\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Merge recorded"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

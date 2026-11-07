@@ -1,0 +1,66 @@
+{
+ "id": "f03_bytes",
+ "title": "Byte size formatter",
+ "request": "Byte size formatter. The user sends a non-negative integer number of bytes. Values below 1024 reply '<n> B'. Otherwise divide by 1024 repeatedly and use KiB, MiB, GiB or TiB with exactly 1 decimal place, e.g. '1.5 KiB'.",
+ "tests": [
+  {
+   "name": "kib",
+   "turns": [
+    {
+     "send": "1536",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "1.5 KiB"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "bytes",
+   "turns": [
+    {
+     "send": "512",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "512 B"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gib",
+   "turns": [
+    {
+     "send": "1073741824",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "1.0 GiB"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "five_gib",
+   "turns": [
+    {
+     "send": "5368709120",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "5.0 GiB"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

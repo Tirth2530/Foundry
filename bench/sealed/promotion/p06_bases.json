@@ -1,0 +1,68 @@
+{
+ "id": "p06_bases",
+ "title": "Number base converter",
+ "request": "Number base converter. 'hex <decimal>' replies '0x<lowercase hex>'. 'dec <hex>' (with or without 0x) replies the decimal value. 'bin <decimal>' replies '0b<binary>'. Invalid input replies 'error: invalid number'.",
+ "tests": [
+  {
+   "name": "hex",
+   "turns": [
+    {
+     "send": "hex 255",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "0xff",
+       "ci": false
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "dec",
+   "turns": [
+    {
+     "send": "dec 0x1F4",
+     "checks": [
+      {
+       "type": "text_number",
+       "value": 500,
+       "tol": 0
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "bin",
+   "turns": [
+    {
+     "send": "bin 10",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "0b1010"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "bad",
+   "turns": [
+    {
+     "send": "hex banana",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "error: invalid number"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

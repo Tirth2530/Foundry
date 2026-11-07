@@ -1,0 +1,80 @@
+{
+ "id": "d05_distance_form",
+ "title": "Distance converter with form card",
+ "request": "Distance converter between km and mi (1 mi = 1.609344 km). If the message has a number and a unit ('5 km' or '3 mi'), reply 'X km = Y mi' or 'X mi = Y km' with Y rounded to 2 decimals. If the unit is missing, reply 'Which unit?' with a form card that has a number field named 'value', a select field named 'unit' with options km and mi, and a Convert submit button whose selection is {\"action\":\"convert\"}. When the submitted form arrives as JSON (e.g. {\"action\":\"convert\",\"value\":\"10\",\"unit\":\"km\"}) convert it the same way.",
+ "tests": [
+  {
+   "name": "km",
+   "turns": [
+    {
+     "send": "5 km",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_number",
+       "value": 3.11,
+       "tol": 0.011
+      },
+      {
+       "type": "no_card"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "mi",
+   "turns": [
+    {
+     "send": "3 mi",
+     "checks": [
+      {
+       "type": "text_number",
+       "value": 4.83,
+       "tol": 0.011
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "missing_unit",
+   "turns": [
+    {
+     "send": "how far is 12",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Which unit"
+      },
+      {
+       "type": "card",
+       "fields": [
+        "value",
+        "unit"
+       ],
+       "kind": "form"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "form_submit",
+   "turns": [
+    {
+     "send": "{\"action\": \"convert\", \"value\": \"10\", \"unit\": \"km\"}",
+     "checks": [
+      {
+       "type": "text_number",
+       "value": 6.21,
+       "tol": 0.011
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,66 @@
+{
+ "id": "d07_http_status",
+ "title": "HTTP status explainer",
+ "request": "HTTP status explainer. The user sends a status code (possibly inside a sentence); reply '<code> <Reason Phrase>'. Known codes: 200 OK, 201 Created, 204 No Content, 301 Moved Permanently, 302 Found, 304 Not Modified, 400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found, 409 Conflict, 418 I'm a teapot, 429 Too Many Requests, 500 Internal Server Error, 502 Bad Gateway, 503 Service Unavailable. Any other code: 'Unknown status'.",
+ "tests": [
+  {
+   "name": "429",
+   "turns": [
+    {
+     "send": "429",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "429 Too Many Requests"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "304",
+   "turns": [
+    {
+     "send": "304",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "304 Not Modified"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "unknown",
+   "turns": [
+    {
+     "send": "299",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Unknown status"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "sentence",
+   "turns": [
+    {
+     "send": "what does 503 mean?",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "503 Service Unavailable"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,56 @@
+{
+ "id": "p08_release_review",
+ "title": "Release gate with review card",
+ "request": "Release gate agent. When the user writes 'release <version> of <service>', reply 'Release <service> <version>?' with a review card whose summary rows include Service and Version, an Approve button (selection {\"action\":\"approve\",\"service\":\"<service>\",\"version\":\"<version>\"}) and a Reject button (selection {\"action\":\"reject\",\"service\":\"<service>\",\"version\":\"<version>\"}). On approve reply 'Released <service> <version>'. On reject reply 'Release of <service> <version> blocked'.",
+ "tests": [
+  {
+   "name": "ask",
+   "turns": [
+    {
+     "send": "release 2.4.0 of checkout",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "Release checkout 2.4.0?"
+      },
+      {
+       "type": "card",
+       "kind": "review"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "approve",
+   "turns": [
+    {
+     "send": "{\"action\": \"approve\", \"service\": \"checkout\", \"version\": \"2.4.0\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Released checkout 2.4.0"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "reject",
+   "turns": [
+    {
+     "send": "{\"action\": \"reject\", \"service\": \"cart\", \"version\": \"1.0.1\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Release of cart 1.0.1 blocked"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

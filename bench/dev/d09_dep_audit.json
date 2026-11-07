@@ -1,0 +1,66 @@
+{
+ "id": "d09_dep_audit",
+ "title": "Dependency auditor with carousel",
+ "request": "Dependency auditor. The user pastes Python requirements, one 'package==version' per line. Use ONLY this advisory list: django < 4.2.8 is vulnerable to CVE-2023-46695; requests < 2.31.0 to CVE-2023-32681; pillow < 10.0.1 to CVE-2023-4863; urllib3 < 1.26.18 to CVE-2023-45803. Package names are case-insensitive. Reply '<k> vulnerable of <n> packages' and, if k > 0, attach a carousel card with one item per vulnerable package (title = package name, subtitle = CVE id), each with a primary button 'Upgrade' whose selection is {\"action\":\"upgrade\",\"package\":\"<name>\"}. If k = 0 reply 'No known vulnerabilities in <n> packages' with no card.",
+ "tests": [
+  {
+   "name": "two_vulns",
+   "turns": [
+    {
+     "send": "django==4.2.1\nrequests==2.31.0\nPillow==9.5.0",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "2 vulnerable of 3 packages"
+      },
+      {
+       "type": "card",
+       "min_items": 2,
+       "contains": "CVE-2023-4863",
+       "kind": "carousel"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "clean",
+   "turns": [
+    {
+     "send": "requests==2.32.3\nflask==3.0.0",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "No known vulnerabilities in 2 packages"
+      },
+      {
+       "type": "no_card"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "one",
+   "turns": [
+    {
+     "send": "urllib3==1.26.5",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "1 vulnerable of 1 packages"
+      },
+      {
+       "type": "card",
+       "min_items": 1,
+       "kind": "carousel"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

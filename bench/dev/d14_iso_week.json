@@ -1,0 +1,66 @@
+{
+ "id": "d14_iso_week",
+ "title": "ISO week",
+ "request": "ISO week agent. The user sends a date as YYYY-MM-DD; reply '<date> is in ISO week <W> of <ISO-year> (<Weekday>)' with the English weekday name. Reply 'Invalid date' if it is not a real date.",
+ "tests": [
+  {
+   "name": "new_year",
+   "turns": [
+    {
+     "send": "2026-01-01",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "ISO week 1 of 2026 (Thursday)"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "week53",
+   "turns": [
+    {
+     "send": "2027-01-01",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "ISO week 53 of 2026 (Friday)"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "today",
+   "turns": [
+    {
+     "send": "2026-11-07",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "ISO week 45 of 2026 (Saturday)"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "invalid",
+   "turns": [
+    {
+     "send": "2026-02-30",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Invalid date"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

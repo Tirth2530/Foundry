@@ -1,0 +1,70 @@
+{
+ "id": "d10_upgrade_gate_multi",
+ "title": "Two-agent upgrade gate",
+ "request": "Build TWO agents. A 'parser' agent receives a version pair from the coordinator and classifies the change. A 'coordinator' agent (the entry agent users talk to) receives 'upgrade <package> from <a> to <b>', asks the parser agent, and replies '<package>: MAJOR upgrade' (or MINOR upgrade / PATCH upgrade / DOWNGRADE / NO CHANGE) together with a review card titled 'Approve upgrade?' with an Approve button (selection {\"action\":\"approve\",\"package\":\"<package>\"}) and a Reject button (selection {\"action\":\"reject\",\"package\":\"<package>\"}). On the approve selection reply 'Upgrade of <package> approved'; on reject reply 'Upgrade of <package> rejected'. MAJOR = first number increases; MINOR = same major, second increases; PATCH = same major.minor, third increases.",
+ "tests": [
+  {
+   "name": "major",
+   "turns": [
+    {
+     "send": "upgrade numpy from 1.26.4 to 2.0.0",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "numpy: MAJOR upgrade"
+      },
+      {
+       "type": "card",
+       "kind": "review"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "minor",
+   "turns": [
+    {
+     "send": "upgrade fastapi from 0.110.0 to 0.111.2",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "fastapi: MINOR upgrade"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "downgrade",
+   "turns": [
+    {
+     "send": "upgrade attrs from 23.2.0 to 23.1.0",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "attrs: DOWNGRADE"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "approve",
+   "turns": [
+    {
+     "send": "{\"action\": \"approve\", \"package\": \"numpy\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Upgrade of numpy approved"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

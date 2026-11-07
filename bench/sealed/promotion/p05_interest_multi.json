@@ -1,0 +1,76 @@
+{
+ "id": "p05_interest_multi",
+ "title": "Two-agent compound interest advisor",
+ "request": "Build TWO agents: a 'calculator' agent that computes compound interest, and an 'advisor' entry agent. The user writes '<principal> at <rate>% for <years> years' (annual compounding). The advisor asks the calculator agent, then replies 'Final balance: <amount>' (rounded to 2 decimals) with a review card titled 'Lock in this plan?' with an Approve button (selection {\"action\":\"approve\"}) and a Reject button (selection {\"action\":\"reject\"}). On approve reply 'Plan locked'; on reject reply 'Plan discarded'.",
+ "tests": [
+  {
+   "name": "ten_years",
+   "turns": [
+    {
+     "send": "1000 at 5% for 10 years",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "Final balance"
+      },
+      {
+       "type": "text_number",
+       "value": 1628.89,
+       "tol": 0.011
+      },
+      {
+       "type": "card",
+       "kind": "review"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "decimal_rate",
+   "turns": [
+    {
+     "send": "2500 at 3.5% for 4 years",
+     "checks": [
+      {
+       "type": "text_number",
+       "value": 2868.81,
+       "tol": 0.011
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "approve",
+   "turns": [
+    {
+     "send": "{\"action\": \"approve\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Plan locked"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "reject",
+   "turns": [
+    {
+     "send": "{\"action\": \"reject\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Plan discarded"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

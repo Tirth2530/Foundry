@@ -1,0 +1,56 @@
+{
+ "id": "d12_tz_convert",
+ "title": "UTC offset converter",
+ "request": "Time converter between fixed UTC offsets. Message format: '<HH:MM> UTC<+/-HH:MM> to UTC<+/-HH:MM>', e.g. '14:30 UTC+00:00 to UTC+05:30'. Reply the converted time as '<HH:MM>' (24-hour), appending ' (+1 day)' or ' (-1 day)' when the date changes.",
+ "tests": [
+  {
+   "name": "ist",
+   "turns": [
+    {
+     "send": "14:30 UTC+00:00 to UTC+05:30",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "20:00"
+      },
+      {
+       "type": "text_not_contains",
+       "value": "day"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "next_day",
+   "turns": [
+    {
+     "send": "23:15 UTC+00:00 to UTC+02:00",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "01:15 (+1 day)"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "prev_day",
+   "turns": [
+    {
+     "send": "01:00 UTC+03:00 to UTC-05:00",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "17:00 (-1 day)"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

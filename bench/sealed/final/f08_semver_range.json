@@ -1,0 +1,70 @@
+{
+ "id": "f08_semver_range",
+ "title": "Semver range checker",
+ "request": "Semver range checker. Message: 'does <version> satisfy <range>' where range is '^X.Y.Z' or '~X.Y.Z'. Caret: same major as X and >= X.Y.Z (when X is 0, the minor must also match). Tilde: same major and minor and >= X.Y.Z. Reply 'YES: <version> <range>' or 'NO: <version> <range>'.",
+ "tests": [
+  {
+   "name": "caret_yes",
+   "turns": [
+    {
+     "send": "does 1.4.2 satisfy ^1.2.0",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_regex",
+       "pattern": "^\\s*YES"
+      },
+      {
+       "type": "text_contains",
+       "value": "1.4.2 ^1.2.0"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "caret_major",
+   "turns": [
+    {
+     "send": "does 2.0.0 satisfy ^1.2.0",
+     "checks": [
+      {
+       "type": "text_regex",
+       "pattern": "^\\s*NO"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "caret_zero",
+   "turns": [
+    {
+     "send": "does 0.3.5 satisfy ^0.2.1",
+     "checks": [
+      {
+       "type": "text_regex",
+       "pattern": "^\\s*NO"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "tilde_yes",
+   "turns": [
+    {
+     "send": "does 1.2.9 satisfy ~1.2.3",
+     "checks": [
+      {
+       "type": "text_regex",
+       "pattern": "^\\s*YES"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

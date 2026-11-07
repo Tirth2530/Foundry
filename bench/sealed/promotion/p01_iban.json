@@ -1,0 +1,56 @@
+{
+ "id": "p01_iban",
+ "title": "IBAN checker",
+ "request": "IBAN checker. Remove spaces and uppercase. It is valid if it is 15-34 characters, starts with 2 letters then 2 digits, and the mod-97 check equals 1 (move the first 4 characters to the end, replace letters with numbers A=10 ... Z=35). Reply 'VALID IBAN (<country code>)' or 'INVALID IBAN'.",
+ "tests": [
+  {
+   "name": "gb",
+   "turns": [
+    {
+     "send": "GB82 WEST 1234 5698 7654 32",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "VALID IBAN (GB)"
+      },
+      {
+       "type": "text_not_contains",
+       "value": "INVALID"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "de",
+   "turns": [
+    {
+     "send": "DE89 3704 0044 0532 0130 00",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "VALID IBAN (DE)"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "bad",
+   "turns": [
+    {
+     "send": "GB82 WEST 1234 5698 7654 33",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "INVALID IBAN"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

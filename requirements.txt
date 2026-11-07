@@ -1,0 +1,5 @@
+uagents>=0.22
+uagents-core>=0.3
+requests>=2.31
+stripe>=10.0
+pytest>=8.0

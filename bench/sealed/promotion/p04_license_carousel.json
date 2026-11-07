@@ -1,0 +1,47 @@
+{
+ "id": "p04_license_carousel",
+ "title": "License checker with carousel",
+ "request": "License compliance checker. The user lists SPDX license ids separated by commas. Copyleft: GPL-2.0, GPL-3.0, AGPL-3.0, LGPL-2.1, LGPL-3.0, MPL-2.0. Permissive: MIT, BSD-2-Clause, BSD-3-Clause, Apache-2.0, ISC, Unlicense. Reply '<k> copyleft, <p> permissive, <u> unknown'. If k > 0 also attach a carousel card with one item per copyleft license (title = license id, subtitle 'copyleft'), each with a button 'Review' whose selection is {\"action\":\"review\",\"license\":\"<id>\"}.",
+ "tests": [
+  {
+   "name": "mixed",
+   "turns": [
+    {
+     "send": "MIT, GPL-3.0, Apache-2.0, AGPL-3.0",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "2 copyleft, 2 permissive, 0 unknown"
+      },
+      {
+       "type": "card",
+       "min_items": 2,
+       "contains": "AGPL-3.0",
+       "kind": "carousel"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "clean",
+   "turns": [
+    {
+     "send": "ISC, BSD-3-Clause, WTFPL",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "0 copyleft, 2 permissive, 1 unknown"
+      },
+      {
+       "type": "no_card"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

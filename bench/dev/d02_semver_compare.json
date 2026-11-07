@@ -1,0 +1,52 @@
+{
+ "id": "d02_semver_compare",
+ "title": "Semver comparison",
+ "request": "Compare two semantic versions written as '<a> vs <b>' (MAJOR.MINOR.PATCH, numeric comparison of each part). Reply '<a> > <b>', '<a> < <b>' or '<a> = <b>' using the versions exactly as given.",
+ "tests": [
+  {
+   "name": "minor_numeric",
+   "turns": [
+    {
+     "send": "1.10.0 vs 1.9.3",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "1.10.0 > 1.9.3"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "equal",
+   "turns": [
+    {
+     "send": "2.0.0 vs 2.0.0",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "2.0.0 = 2.0.0"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "zero_major",
+   "turns": [
+    {
+     "send": "0.9.12 vs 0.10.0",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "0.9.12 < 0.10.0"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

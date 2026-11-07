@@ -1,0 +1,52 @@
+{
+ "id": "d04_slugify",
+ "title": "Slug generator",
+ "request": "Slug generator. Reply 'slug: <slug>' where the slug is the user's text lowercased, with every run of characters that are not a-z or 0-9 replaced by a single '-', and leading/trailing '-' removed.",
+ "tests": [
+  {
+   "name": "basic",
+   "turns": [
+    {
+     "send": "Hello, World! 2026",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "slug: hello-world-2026"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "spaces",
+   "turns": [
+    {
+     "send": "  Fetch.ai -- Agents  ",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "slug: fetch-ai-agents"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "symbols",
+   "turns": [
+    {
+     "send": "C++ & Rust: 2 langs",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "slug: c-rust-2-langs"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

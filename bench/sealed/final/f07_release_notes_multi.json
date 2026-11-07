@@ -1,0 +1,48 @@
+{
+ "id": "f07_release_notes_multi",
+ "title": "Two-agent release notes",
+ "request": "Build TWO agents: a 'classifier' agent that classifies conventional-commit messages by type (feat, fix, docs, chore, refactor, test; the type is the text before the first ':' or '('; anything else is 'other'), and a 'release_notes' entry agent. The user pastes commit messages one per line; release_notes asks the classifier agent and replies with counts in exactly this order: 'feat=<a> fix=<b> docs=<c> chore=<d> refactor=<e> test=<f> other=<g>', plus a carousel card with one item per type whose count is > 0 (title = type, subtitle = '<count> commits').",
+ "tests": [
+  {
+   "name": "mixed",
+   "turns": [
+    {
+     "send": "feat: add login\nfix(api): null check\nfeat(ui): dark mode\nchore: bump deps\nwip stuff",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "feat=2 fix=1 docs=0 chore=1 refactor=0 test=0 other=1"
+      },
+      {
+       "type": "card",
+       "min_items": 4,
+       "kind": "carousel"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "single",
+   "turns": [
+    {
+     "send": "docs: readme",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "feat=0 fix=0 docs=1 chore=0 refactor=0 test=0 other=0"
+      },
+      {
+       "type": "card",
+       "min_items": 1,
+       "kind": "carousel"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

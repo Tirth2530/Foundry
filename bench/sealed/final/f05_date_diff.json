@@ -1,0 +1,52 @@
+{
+ "id": "f05_date_diff",
+ "title": "Date difference",
+ "request": "Date difference agent. The user sends 'YYYY-MM-DD to YYYY-MM-DD'; reply '<N> days' where N is the second date minus the first (can be negative). If either date is not a real date reply 'Invalid date'.",
+ "tests": [
+  {
+   "name": "forward",
+   "turns": [
+    {
+     "send": "2026-01-01 to 2026-11-07",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "310 days"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "negative_leap",
+   "turns": [
+    {
+     "send": "2024-03-01 to 2024-02-01",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "-29 days"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "invalid",
+   "turns": [
+    {
+     "send": "2026-02-30 to 2026-03-01",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Invalid date"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

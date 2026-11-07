@@ -1,0 +1,19 @@
+{
+  "routing": {
+    "foreman": "asi",
+    "architect": "asi",
+    "builder": "gpt",
+    "repair": "gpt",
+    "examiner": "meta",
+    "adversary": "meta",
+    "miner": "gpt",
+    "evolver": "gpt"
+  },
+  "tools": {
+    "preflight_static": true,
+    "run_examiner_tests": true,
+    "selection_json_probe": false,
+    "include_reply_text": false
+  },
+  "repair_budget": 2
+}

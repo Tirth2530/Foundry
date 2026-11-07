@@ -1,0 +1,73 @@
+{
+ "id": "f04_bookmarks",
+ "title": "Bookmarks with memory and carousel",
+ "request": "Bookmark manager with per-user memory. 'save <url> as <name>' stores it and replies 'Saved <name>'. 'bookmarks' replies '<n> bookmarks' and, if n > 0, attaches a carousel card with one item per bookmark (title = name, subtitle = url) with an 'Open' button whose selection is {\"action\":\"open\",\"name\":\"<name>\"}; if n = 0 reply '0 bookmarks' with no card. When the open selection arrives as JSON reply 'Opening <url>'.",
+ "tests": [
+  {
+   "name": "flow",
+   "turns": [
+    {
+     "send": "save https://fetch.ai as fetch",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_contains",
+       "value": "Saved fetch"
+      }
+     ]
+    },
+    {
+     "send": "save https://agentverse.ai as av",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Saved av"
+      }
+     ]
+    },
+    {
+     "send": "bookmarks",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "2 bookmarks"
+      },
+      {
+       "type": "card",
+       "min_items": 2,
+       "kind": "carousel"
+      }
+     ]
+    },
+    {
+     "send": "{\"action\": \"open\", \"name\": \"av\"}",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "Opening https://agentverse.ai"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "empty",
+   "turns": [
+    {
+     "send": "bookmarks",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "0 bookmarks"
+      },
+      {
+       "type": "no_card"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

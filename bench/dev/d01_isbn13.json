@@ -1,0 +1,74 @@
+{
+ "id": "d01_isbn13",
+ "title": "ISBN-13 checker",
+ "request": "ISBN-13 checker. The user sends an ISBN-13 (digits, hyphens allowed). Reply exactly 'VALID' if the check digit is correct, otherwise 'INVALID'. If the input does not contain exactly 13 digits after removing hyphens, reply 'INVALID: need 13 digits'.",
+ "tests": [
+  {
+   "name": "valid_hyphens",
+   "turns": [
+    {
+     "send": "978-0-306-40615-7",
+     "checks": [
+      {
+       "type": "ack"
+      },
+      {
+       "type": "text_regex",
+       "pattern": "^\\s*VALID"
+      },
+      {
+       "type": "text_not_contains",
+       "value": "INVALID"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "valid_plain",
+   "turns": [
+    {
+     "send": "9781861972712",
+     "checks": [
+      {
+       "type": "text_regex",
+       "pattern": "^\\s*VALID"
+      },
+      {
+       "type": "text_not_contains",
+       "value": "INVALID"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "bad_check",
+   "turns": [
+    {
+     "send": "9780306406158",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "INVALID"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "too_short",
+   "turns": [
+    {
+     "send": "12345",
+     "checks": [
+      {
+       "type": "text_contains",
+       "value": "need 13 digits"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
