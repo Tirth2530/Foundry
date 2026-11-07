@@ -95,8 +95,8 @@ def main():
             ev["cleanup_confirmed"] = confirmed
             step("cleanup", target=report[target], relay=relay_clean, confirmed=confirmed)
     ev["finished"] = datetime.now(timezone.utc).isoformat()
-    (ROOT / "evidence").mkdir(exist_ok=True)
-    out = ROOT / "evidence" / "gate1.json"
+    config.EVIDENCE.mkdir(parents=True, exist_ok=True)
+    out = config.EVIDENCE / "gate1.json"  # the configured evidence dir (tests point this at a temp dir)
     out.write_text(json.dumps(ev, indent=2))
     print(f"\nGATE 1: {ev['result']}\nEvidence: {out}")
     if ev["result"] != "PASS" or not ev.get("cleanup_confirmed", True):

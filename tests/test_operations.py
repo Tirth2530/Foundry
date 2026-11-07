@@ -74,9 +74,13 @@ def test_failing_gate1_exits_nonzero(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "AGENTVERSE_API_KEY", "k")
     monkeypatch.setattr(agentverse, "Client", Boom)
     monkeypatch.setattr(config, "EVIDENCE", tmp_path)
+    real = (config.ROOT / "evidence" / "gate1.json")
+    before = real.read_bytes() if real.exists() else None
     with pytest.raises(SystemExit) as e:
         runpy.run_path(str(config.ROOT / "tools" / "gate1_spike.py"), run_name="__main__")
     assert e.value.code == 1
+    assert (tmp_path / "gate1.json").exists()                                  # evidence went to the test dir
+    assert (real.read_bytes() if real.exists() else None) == before            # the real evidence is untouched
 
 
 def test_doctor_and_deploy_share_api_version_resolution(monkeypatch):
